@@ -242,44 +242,62 @@ export async function getAllCampaigns(): Promise<CampaignRecord[]> {
 
       if (!error && data) {
         const mapped = data.map(mapSupabaseToCampaignRecord);
-        // Cache locally for offline availability
-        try {
-          localStorage.setItem("local_campaigns", JSON.stringify(mapped));
-        } catch (e) {}
         
         if (mapped.length > 0) {
+          try {
+            localStorage.setItem("local_campaigns", JSON.stringify(mapped));
+          } catch (e) {}
           return mapped;
         }
 
-        // Fresh database: check if we have local campaigns to sync, or populate default seeds into DB
-        const localRaw = localStorage.getItem("local_campaigns");
-        const localItems: CampaignRecord[] = localRaw ? JSON.parse(localRaw) : [...INITIAL_SEED_CAMPAIGNS];
-        if (localItems.length > 0) {
-          await syncAllCampaignsToDatabase(localItems);
-          const reFetch = await supabase.from("campaigns").select("*").order("updated_at", { ascending: false });
-          if (!reFetch.error && reFetch.data) {
-            return reFetch.data.map(mapSupabaseToCampaignRecord);
+        // Fresh / Empty database: check for local items or use initial seed campaigns
+        let localItems: CampaignRecord[] = [];
+        try {
+          const localRaw = localStorage.getItem("local_campaigns");
+          if (localRaw) {
+            localItems = JSON.parse(localRaw);
           }
+        } catch (e) {}
+
+        if (!Array.isArray(localItems) || localItems.length === 0) {
+          localItems = [...INITIAL_SEED_CAMPAIGNS];
         }
-        return mapped;
+
+        // Auto-seed the newly connected Supabase database
+        await syncAllCampaignsToDatabase(localItems);
+
+        try {
+          localStorage.setItem("local_campaigns", JSON.stringify(localItems));
+        } catch (e) {}
+
+        const reFetch = await supabase.from("campaigns").select("*").order("updated_at", { ascending: false });
+        if (!reFetch.error && reFetch.data && reFetch.data.length > 0) {
+          return reFetch.data.map(mapSupabaseToCampaignRecord);
+        }
+
+        return localItems.map(mapSupabaseToCampaignRecord);
+      } else if (error) {
+        console.error("[CampaignStorage] Supabase fetch error:", error);
       }
     } catch (err) {
       console.error("[CampaignStorage] Error fetching from Supabase:", err);
     }
   }
 
-  // Fallback to local storage only if offline
+  // Fallback to local storage or seed if offline/error
   try {
     const localRaw = localStorage.getItem("local_campaigns");
     if (localRaw) {
       const parsed: CampaignRecord[] = JSON.parse(localRaw);
-      return parsed.map(mapSupabaseToCampaignRecord);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed.map(mapSupabaseToCampaignRecord);
+      }
     }
   } catch (e) {
     console.error("[CampaignStorage] Error reading local_campaigns:", e);
   }
 
-  return INITIAL_SEED_CAMPAIGNS;
+  return INITIAL_SEED_CAMPAIGNS.map(mapSupabaseToCampaignRecord);
 }
 
 
@@ -287,11 +305,8 @@ export async function getAllCampaigns(): Promise<CampaignRecord[]> {
  * Syncs/Populates all given campaign records to Supabase database.
  */
 export async function syncAllCampaignsToDatabase(campaigns: CampaignRecord[]): Promise<number> {
-  const isRealSupabase = Boolean(
-    import.meta.env.VITE_SUPABASE_URL && 
-    import.meta.env.VITE_SUPABASE_URL !== 'https://placeholder.supabase.co'
-  );
-  if (!isRealSupabase || typeof navigator === 'undefined' || !navigator.onLine) return 0;
+  const isRealSupabase = isSupabaseConfigured();
+  if (!isRealSupabase) return 0;
 
   let count = 0;
   for (const record of campaigns) {
@@ -301,7 +316,6 @@ export async function syncAllCampaignsToDatabase(campaigns: CampaignRecord[]): P
       if (!error) {
         count++;
       } else {
-        // Retry with core fallback payload if custom table columns are missing
         const fallbackPayload = {
           id: String(record.id),
           name: record.name || "Untitled",
@@ -457,10 +471,7 @@ export async function saveCampaignRecord(campaign: Partial<CampaignRecord> & { n
 
   // 2. Try saving to Supabase if online
   let remoteSuccess = false;
-  const isRealSupabase = Boolean(
-    import.meta.env.VITE_SUPABASE_URL && 
-    import.meta.env.VITE_SUPABASE_URL !== 'https://placeholder.supabase.co'
-  );
+  const isRealSupabase = isSupabaseConfigured();
 
   const isOnlineNow = typeof navigator !== 'undefined' && navigator.onLine;
 
@@ -570,10 +581,7 @@ export async function processOfflineSyncQueue(): Promise<{ synced: number; remai
     let syncedCount = 0;
     const remainingQueue: CampaignRecord[] = [];
 
-    const isRealSupabase = Boolean(
-      import.meta.env.VITE_SUPABASE_URL && 
-      import.meta.env.VITE_SUPABASE_URL !== 'https://placeholder.supabase.co'
-    );
+    const isRealSupabase = isSupabaseConfigured();
 
     const localRaw = localStorage.getItem("local_campaigns");
     let localList: CampaignRecord[] = localRaw ? JSON.parse(localRaw) : [];
