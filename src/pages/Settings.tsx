@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from "react";
-import { User, Globe, Save, Plus, Pencil, Trash2, Users, Upload, AlertTriangle, Settings as SettingsIcon } from "lucide-react";
+import { User, Globe, Save, Plus, Pencil, Trash2, Users, Upload, AlertTriangle, Settings as SettingsIcon, Database, CloudUpload, Server, CheckCircle2, AlertCircle, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/lib/supabase";
 import { logAction } from "@/lib/logger";
 import { Image as ImageIcon } from "lucide-react";
+import { getAllCampaigns, syncAllCampaignsToDatabase, processOfflineSyncQueue } from "@/lib/campaign-storage";
 
 const defaultCountries: any[] = [];
 const defaultTeams: any[] = [];
@@ -33,6 +34,30 @@ export function Settings({ role }: { role: string }) {
   const [logos, setLogos] = useState({ expanded: "https://zetaglobal.com/wp-content/uploads/2023/02/zeta_logoPrimary.svg", collapsed: "https://companieslogo.com/img/orig/ZETA-424536bc.png" });
   const [activeTab, setActiveTab] = useState("profile");
   const [selectedCountryFilter, setSelectedCountryFilter] = useState<string>("All");
+
+  const [isMigratingDb, setIsMigratingDb] = useState(false);
+  const [migrationStatusMsg, setMigrationStatusMsg] = useState<string | null>(null);
+
+  const isRealSupabase = Boolean(
+    import.meta.env.VITE_SUPABASE_URL && 
+    import.meta.env.VITE_SUPABASE_URL !== 'https://placeholder.supabase.co'
+  );
+
+  const handleFullDataMigration = async () => {
+    setIsMigratingDb(true);
+    setMigrationStatusMsg("Gathering all local campaign records...");
+    try {
+      const campaigns = await getAllCampaigns();
+      setMigrationStatusMsg(`Syncing ${campaigns.length} campaign(s) to Supabase database...`);
+      const count = await syncAllCampaignsToDatabase(campaigns);
+      await processOfflineSyncQueue();
+      setMigrationStatusMsg(`Successfully synced ${count} campaign(s) to Supabase database!`);
+    } catch (err: any) {
+      setMigrationStatusMsg(`Migration error: ${err.message || err}`);
+    } finally {
+      setIsMigratingDb(false);
+    }
+  };
 
   useEffect(() => {
     async function loadData() {
@@ -206,6 +231,18 @@ export function Settings({ role }: { role: string }) {
               <span>My Profile</span>
             </button>
             <button
+              onClick={() => setActiveTab("database")}
+              className={cn(
+                "w-full flex items-center space-x-3 px-3.5 py-2.5 rounded-xl transition-all text-xs font-bold cursor-pointer",
+                activeTab === "database" 
+                  ? "bg-cyan-50 text-cyan-800 shadow-2xs border border-cyan-200" 
+                  : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+              )}
+            >
+              <Database className="h-4 w-4 text-cyan-600" />
+              <span>Database & Storage</span>
+            </button>
+            <button
               onClick={() => setActiveTab("countries")}
               className={cn(
                 "w-full flex items-center space-x-3 px-3.5 py-2.5 rounded-xl transition-all text-xs font-bold cursor-pointer",
@@ -264,6 +301,96 @@ export function Settings({ role }: { role: string }) {
 
         <div className="flex-1 overflow-y-auto p-8">
           <div className="w-full">
+            {activeTab === "database" && (
+              <div className="space-y-6">
+                <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-6">
+                  <div className="flex items-center justify-between border-b border-slate-100 pb-4 mb-6">
+                    <div>
+                      <h3 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
+                        <Database className="w-5 h-5 text-cyan-600" />
+                        Database Connection & Persistence
+                      </h3>
+                      <p className="text-sm text-slate-500 mt-1">
+                        Connect your Supabase database to ensure all campaigns and settings are stored safely in the cloud across deployments.
+                      </p>
+                    </div>
+                    <div>
+                      {isRealSupabase ? (
+                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                          Database Connected
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 border border-amber-200">
+                          <AlertCircle className="w-4 h-4 text-amber-600" />
+                          Local Storage Mode
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {!isRealSupabase && (
+                    <div className="bg-amber-50/70 border border-amber-200 rounded-lg p-4 text-xs text-amber-900 space-y-2 mb-6">
+                      <p className="font-semibold text-sm flex items-center gap-1.5 text-amber-950">
+                        <AlertTriangle className="w-4 h-4 text-amber-600" />
+                        No database environment variables detected!
+                      </p>
+                      <p>
+                        Your application is currently running in <strong>Local Storage Mode</strong>. Campaigns created now are saved in your browser's local cache. When deploying to Vercel or migrating devices, you must add your database keys to persist all data permanently.
+                      </p>
+                    </div>
+                  )}
+
+                  <div className="space-y-4">
+                    <h4 className="text-sm font-semibold text-slate-800">Required Environment Variables (.env / Vercel Settings)</h4>
+                    <div className="bg-slate-900 text-slate-100 rounded-lg p-4 font-mono text-xs space-y-2 overflow-x-auto border border-slate-800">
+                      <div><span className="text-slate-500"># Supabase Project URL</span></div>
+                      <div><span className="text-cyan-400">VITE_SUPABASE_URL</span>=https://your-project.supabase.co</div>
+                      <div className="pt-2"><span className="text-slate-500"># Supabase Anon API Key</span></div>
+                      <div><span className="text-cyan-400">VITE_SUPABASE_ANON_KEY</span>=your-anon-key-here</div>
+                    </div>
+                  </div>
+
+                  <div className="mt-6 pt-6 border-t border-slate-100 space-y-4">
+                    <h4 className="text-sm font-semibold text-slate-800 flex items-center gap-2">
+                      <CloudUpload className="w-4 h-4 text-blue-600" />
+                      Bulk Data Migration & Sync
+                    </h4>
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      If you created campaigns while offline or in Local Storage Mode before adding your database connection, click below to migrate and sync all local campaign records into your database without losing anything.
+                    </p>
+
+                    {migrationStatusMsg && (
+                      <div className="p-3 bg-slate-100 border border-slate-200 rounded-md text-xs font-mono text-slate-700 flex items-center gap-2">
+                        {isMigratingDb && <RefreshCw className="w-3.5 h-3.5 text-blue-600 animate-spin" />}
+                        {migrationStatusMsg}
+                      </div>
+                    )}
+
+                    <div className="flex gap-3">
+                      <button
+                        onClick={handleFullDataMigration}
+                        disabled={isMigratingDb}
+                        className="flex items-center gap-2 px-4 py-2 bg-[#2b61d6] text-white rounded-md text-xs font-bold hover:bg-blue-700 disabled:opacity-50 transition-colors shadow-sm cursor-pointer"
+                      >
+                        {isMigratingDb ? (
+                          <>
+                            <RefreshCw className="w-4 h-4 animate-spin" />
+                            Migrating Data...
+                          </>
+                        ) : (
+                          <>
+                            <Server className="w-4 h-4" />
+                            Migrate & Sync All Local Data to Database
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {activeTab === "profile" && (
               <div className="bg-white border border-slate-200 rounded-xl shadow-sm">
                 <div className="p-6 border-b border-slate-100 bg-slate-50/50 rounded-t-xl">

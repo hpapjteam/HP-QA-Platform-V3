@@ -186,16 +186,63 @@ const INITIAL_SEED_CAMPAIGNS: CampaignRecord[] = [
   }
 ];
 
+function mapSupabaseToCampaignRecord(item: any): CampaignRecord {
+  return {
+    id: String(item.id),
+    name: item.name || "Untitled",
+    country: item.country || "IN",
+    versionName: item.versionName || item.version_name || "Standard",
+    version_name: item.version_name || item.versionName || "Standard",
+    status: item.status || "Draft",
+    webViewUrl: item.webViewUrl || item.web_view_url || "",
+    web_view_url: item.web_view_url || item.webViewUrl || "",
+    figmaUrl: item.figmaUrl || item.figma_url || "",
+    figma_url: item.figma_url || item.figmaUrl || "",
+    htmlSource: item.htmlSource || item.html_source || "",
+    html_source: item.html_source || item.htmlSource || "",
+    litmusUrl: item.litmusUrl || item.litmus_url || "",
+    litmus_url: item.litmus_url || item.litmusUrl || "",
+    designType: item.designType || item.design_type || "figma",
+    team: item.team || "HP-APJ",
+    mockupFileName: item.mockupFileName || item.mockup_file_name || "",
+    mockupDataUrl: item.mockupDataUrl || item.mockup_data_url || "",
+    outlookFileName: item.outlookFileName || item.outlook_file_name || "",
+    outlookExtractedHtml: item.outlookExtractedHtml || item.outlook_extracted_html || "",
+    outlookSubject: item.outlookSubject || item.outlook_subject || "",
+    userEmail: item.userEmail || item.user_email || item.createdBy || "admin@example.com",
+    createdBy: item.createdBy || item.created_by || item.userEmail || "QA User",
+    lastEditedBy: item.lastEditedBy || item.last_edited_by || "QA User",
+    created_at: item.created_at || new Date().toISOString(),
+    updated_at: item.updated_at || new Date().toISOString(),
+    is_deleted: item.is_deleted || false,
+    deleted_by: item.deleted_by || null,
+    deleted_at: item.deleted_at || null,
+    folder_id: item.folder_id || "2026",
+    reviewNote: item.reviewNote || item.review_note || "",
+    qaResults: item.qaResults || item.qa_results || [],
+    checklists: item.checklists || [],
+    checklistAnswers: item.checklistAnswers || item.checklist_answers || {},
+    currentStep: item.currentStep !== undefined ? item.currentStep : (item.current_step !== undefined ? item.current_step : 1),
+    current_step: item.current_step !== undefined ? item.current_step : (item.currentStep !== undefined ? item.currentStep : 1),
+  };
+}
+
 /**
  * Gets all campaigns from Supabase and LocalStorage.
  */
 export async function getAllCampaigns(): Promise<CampaignRecord[]> {
   let combined: CampaignRecord[] = [];
+  const isRealSupabase = Boolean(
+    import.meta.env.VITE_SUPABASE_URL && 
+    import.meta.env.VITE_SUPABASE_URL !== 'https://placeholder.supabase.co'
+  );
 
   try {
-    const { data, error } = await supabase.from("campaigns").select("*").order("updated_at", { ascending: false });
-    if (!error && data) {
-      combined = [...data];
+    if (isRealSupabase) {
+      const { data, error } = await supabase.from("campaigns").select("*").order("updated_at", { ascending: false });
+      if (!error && data) {
+        combined = data.map(mapSupabaseToCampaignRecord);
+      }
     }
   } catch (err) {
     console.error("[CampaignStorage] Error fetching from Supabase:", err);
@@ -203,28 +250,33 @@ export async function getAllCampaigns(): Promise<CampaignRecord[]> {
 
   try {
     const localRaw = localStorage.getItem("local_campaigns");
-    if (localRaw) {
-      const localItems: CampaignRecord[] = JSON.parse(localRaw);
-      localItems.forEach((item) => {
-        const exists = combined.some((c) => String(c.id) === String(item.id));
-        if (!exists) {
-          combined.push(item);
-        } else {
-          // Replace with local item if it has a newer updated_at
-          const idx = combined.findIndex((c) => String(c.id) === String(item.id));
-          if (idx !== -1) {
-            const remoteTime = new Date(combined[idx].updated_at || 0).getTime();
-            const localTime = new Date(item.updated_at || 0).getTime();
-            if (localTime > remoteTime) {
-              combined[idx] = { ...combined[idx], ...item };
-            }
-          }
+    let localItems: CampaignRecord[] = localRaw ? JSON.parse(localRaw) : [];
+
+    if (localItems.length === 0 && combined.length === 0) {
+      localItems = [...INITIAL_SEED_CAMPAIGNS];
+      localStorage.setItem("local_campaigns", JSON.stringify(localItems));
+    }
+
+    localItems.forEach((item) => {
+      const mappedItem = mapSupabaseToCampaignRecord(item);
+      const idx = combined.findIndex((c) => String(c.id) === String(mappedItem.id));
+      if (idx === -1) {
+        combined.push(mappedItem);
+      } else {
+        const remoteTime = new Date(combined[idx].updated_at || 0).getTime();
+        const localTime = new Date(mappedItem.updated_at || 0).getTime();
+        if (localTime >= remoteTime) {
+          combined[idx] = { ...combined[idx], ...mappedItem };
         }
-      });
-    } else if (combined.length === 0) {
-      // Seed default campaigns if both are empty
-      localStorage.setItem("local_campaigns", JSON.stringify(INITIAL_SEED_CAMPAIGNS));
-      combined = [...INITIAL_SEED_CAMPAIGNS];
+      }
+    });
+
+    // Save consolidated items to local storage
+    localStorage.setItem("local_campaigns", JSON.stringify(combined));
+
+    // Auto-populate to Supabase if connected and online so migration/sync happens seamlessly
+    if (isRealSupabase && typeof navigator !== 'undefined' && navigator.onLine) {
+      syncAllCampaignsToDatabase(combined).catch(e => console.warn("[CampaignStorage] Background migration sync warning:", e));
     }
   } catch (e) {
     console.error("[CampaignStorage] Error parsing local_campaigns:", e);
@@ -235,6 +287,57 @@ export async function getAllCampaigns(): Promise<CampaignRecord[]> {
   }
 
   return combined;
+}
+
+/**
+ * Syncs/Populates all given campaign records to Supabase database.
+ */
+export async function syncAllCampaignsToDatabase(campaigns: CampaignRecord[]): Promise<number> {
+  const isRealSupabase = Boolean(
+    import.meta.env.VITE_SUPABASE_URL && 
+    import.meta.env.VITE_SUPABASE_URL !== 'https://placeholder.supabase.co'
+  );
+  if (!isRealSupabase || typeof navigator === 'undefined' || !navigator.onLine) return 0;
+
+  let count = 0;
+  for (const record of campaigns) {
+    try {
+      const payload = formatSupabaseCampaignRecord(record);
+      const { error } = await supabase.from("campaigns").upsert(payload);
+      if (!error) {
+        count++;
+      } else {
+        // Retry with core fallback payload if custom table columns are missing
+        const fallbackPayload = {
+          id: String(record.id),
+          name: record.name || "Untitled",
+          country: record.country || "IN",
+          version_name: record.versionName || record.version_name || "Standard",
+          status: record.status || "Draft",
+          web_view_url: record.webViewUrl || record.web_view_url || "",
+          figma_url: record.figmaUrl || record.figma_url || "",
+          html_source: record.htmlSource || record.html_source || "",
+          litmus_url: record.litmusUrl || record.litmus_url || "",
+          folder_id: record.folder_id || "2026",
+          user_email: record.userEmail || record.createdBy || "admin@example.com",
+          created_by: record.createdBy || record.userEmail || "QA User",
+          last_edited_by: record.lastEditedBy || record.userEmail || "QA User",
+          created_at: record.created_at || new Date().toISOString(),
+          updated_at: record.updated_at || new Date().toISOString(),
+          is_deleted: record.is_deleted || false,
+          deleted_by: record.deleted_by || null,
+          deleted_at: record.deleted_at || null,
+          review_note: record.reviewNote || "",
+          current_step: record.currentStep || record.current_step || 1
+        };
+        const fbRes = await supabase.from("campaigns").upsert(fallbackPayload);
+        if (!fbRes.error) count++;
+      }
+    } catch (e) {
+      console.warn(`[CampaignStorage] Error populating campaign "${record.name}" to database:`, e);
+    }
+  }
+  return count;
 }
 
 /**
@@ -265,6 +368,13 @@ function formatSupabaseCampaignRecord(rec: CampaignRecord): Record<string, any> 
     figma_url: rec.figmaUrl || rec.figma_url || "",
     html_source: rec.htmlSource || rec.html_source || "",
     litmus_url: rec.litmusUrl || rec.litmus_url || "",
+    design_type: rec.designType || "figma",
+    team: rec.team || "HP-APJ",
+    mockup_file_name: rec.mockupFileName || "",
+    mockup_data_url: rec.mockupDataUrl || "",
+    outlook_file_name: rec.outlookFileName || "",
+    outlook_extracted_html: rec.outlookExtractedHtml || "",
+    outlook_subject: rec.outlookSubject || "",
     folder_id: rec.folder_id || "2026",
     user_email: rec.userEmail || rec.createdBy || "admin@example.com",
     created_by: rec.createdBy || rec.userEmail || "QA User",
@@ -275,7 +385,10 @@ function formatSupabaseCampaignRecord(rec: CampaignRecord): Record<string, any> 
     deleted_by: rec.deleted_by || null,
     deleted_at: rec.deleted_at || null,
     review_note: rec.reviewNote || "",
-    current_step: rec.currentStep || rec.current_step || 1
+    qa_results: rec.qaResults || [],
+    checklists: rec.checklists || [],
+    checklist_answers: rec.checklistAnswers || {},
+    current_step: rec.currentStep !== undefined ? rec.currentStep : (rec.current_step || 1)
   };
 }
 
@@ -365,7 +478,33 @@ export async function saveCampaignRecord(campaign: Partial<CampaignRecord> & { n
         if (!error) {
           remoteSuccess = true;
         } else {
-          console.warn("[CampaignStorage] Supabase save returned notice:", error);
+          console.warn("[CampaignStorage] Full payload upsert error, trying fallback payload:", error);
+          const fallbackPayload = {
+            id: String(record.id),
+            name: record.name || "Untitled",
+            country: record.country || "IN",
+            version_name: record.versionName || record.version_name || "Standard",
+            status: record.status || "Draft",
+            web_view_url: record.webViewUrl || record.web_view_url || "",
+            figma_url: record.figmaUrl || record.figma_url || "",
+            html_source: record.htmlSource || record.html_source || "",
+            litmus_url: record.litmusUrl || record.litmus_url || "",
+            folder_id: record.folder_id || "2026",
+            user_email: record.userEmail || record.createdBy || "admin@example.com",
+            created_by: record.createdBy || record.userEmail || "QA User",
+            last_edited_by: record.lastEditedBy || record.userEmail || "QA User",
+            created_at: record.created_at || new Date().toISOString(),
+            updated_at: record.updated_at || new Date().toISOString(),
+            is_deleted: record.is_deleted || false,
+            deleted_by: record.deleted_by || null,
+            deleted_at: record.deleted_at || null,
+            review_note: record.reviewNote || "",
+            current_step: record.currentStep || record.current_step || 1
+          };
+          const fbRes = await supabase.from("campaigns").upsert(fallbackPayload);
+          if (!fbRes.error) {
+            remoteSuccess = true;
+          }
         }
       } catch (err) {
         console.warn("[CampaignStorage] Supabase network error:", err);

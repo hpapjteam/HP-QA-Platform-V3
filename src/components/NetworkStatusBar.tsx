@@ -10,9 +10,13 @@ import {
   CloudUpload,
   Radio,
   Sliders,
-  Check
+  Check,
+  Server,
+  Key,
+  ExternalLink,
+  Info
 } from "lucide-react";
-import { processOfflineSyncQueue } from "@/lib/campaign-storage";
+import { processOfflineSyncQueue, syncAllCampaignsToDatabase, getAllCampaigns } from "@/lib/campaign-storage";
 import { cn } from "@/lib/utils";
 
 export function NetworkStatusBar() {
@@ -31,6 +35,13 @@ export function NetworkStatusBar() {
     type: "info"
   });
   const [showSimulatorModal, setShowSimulatorModal] = useState<boolean>(false);
+  const [showDbModal, setShowDbModal] = useState<boolean>(false);
+
+  // Check real Supabase connection env
+  const isRealSupabase = Boolean(
+    import.meta.env.VITE_SUPABASE_URL && 
+    import.meta.env.VITE_SUPABASE_URL !== 'https://placeholder.supabase.co'
+  );
 
   // Effective online status
   const isOnline = isBrowserOnline && !isSimulatedOffline;
@@ -50,30 +61,41 @@ export function NetworkStatusBar() {
     }
   };
 
-  // Perform sync
+  // Perform full database sync (queue + local database records)
   const triggerSync = async () => {
     if (isSyncing) return;
     setIsSyncing(true);
 
     try {
-      const [res] = await Promise.all([
+      const allCampaigns = await getAllCampaigns();
+      const [queueRes, dbSyncedCount] = await Promise.all([
         processOfflineSyncQueue(),
+        isRealSupabase ? syncAllCampaignsToDatabase(allCampaigns) : Promise.resolve(0),
         new Promise((resolve) => setTimeout(resolve, 600)) // minimum pulse animation duration
       ]);
 
       updateQueueCount();
 
-      if (res.synced > 0) {
+      const totalPushed = (queueRes?.synced || 0) + (dbSyncedCount || 0);
+
+      if (totalPushed > 0) {
         setToastMessage({
           title: "Database Synchronized",
-          desc: `Successfully pushed ${res.synced} pending record${res.synced === 1 ? "" : "s"} to the database.`,
+          desc: `Successfully pushed ${totalPushed} campaign record${totalPushed === 1 ? "" : "s"} to the database.`,
           type: "success"
         });
         setShowToast(true);
-      } else if (pendingCount > 0 && res.remaining === 0) {
+      } else if (!isRealSupabase) {
         setToastMessage({
-          title: "Queue Cleared",
-          desc: "All local offline drafts are up to date in database.",
+          title: "Local Cache Active",
+          desc: "All campaigns saved locally in browser storage. Connect Supabase database to sync across devices.",
+          type: "info"
+        });
+        setShowToast(true);
+      } else {
+        setToastMessage({
+          title: "Database Up to Date",
+          desc: "All local records match the connected database.",
           type: "success"
         });
         setShowToast(true);
@@ -120,17 +142,9 @@ export function NetworkStatusBar() {
     window.addEventListener("storage", updateQueueCount);
     window.addEventListener("offline-queue-updated", handleQueueUpdate);
 
-    // Initial check on mount: if online and queue has items, auto-sync!
+    // Initial check on mount: if online and queue has items or connects real supabase, auto-sync!
     if (navigator.onLine && !isSimulatedOffline) {
-      const raw = localStorage.getItem("offline_sync_queue");
-      if (raw) {
-        try {
-          const q = JSON.parse(raw);
-          if (Array.isArray(q) && q.length > 0) {
-            triggerSync();
-          }
-        } catch {}
-      }
+      triggerSync();
     }
 
     return () => {
@@ -176,11 +190,13 @@ export function NetworkStatusBar() {
 
   return (
     <>
-      {/* 1. Persistent Top Network Status Bar */}
+      {/* 1. Persistent Top Network & Database Status Bar */}
       <header className={cn(
         "w-full px-4 py-2 text-xs border-b transition-all duration-300 flex items-center justify-between z-30 shrink-0 select-none",
         !isOnline 
           ? "bg-amber-50 text-amber-900 border-amber-200" 
+          : !isRealSupabase
+          ? "bg-amber-500/10 text-amber-900 border-amber-200"
           : isSyncing 
           ? "bg-blue-50 text-blue-900 border-blue-200"
           : "bg-slate-900 text-slate-200 border-slate-800"
@@ -198,6 +214,10 @@ export function NetworkStatusBar() {
                 <span className="animate-ping absolute inline-flex h-4 w-4 rounded-full bg-blue-400 opacity-75"></span>
                 <RefreshCw className="w-3.5 h-3.5 text-blue-600 animate-spin relative z-10" />
               </div>
+            ) : !isRealSupabase ? (
+              <div className="relative flex items-center justify-center">
+                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-500"></span>
+              </div>
             ) : (
               <div className="relative flex items-center justify-center">
                 <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
@@ -212,12 +232,17 @@ export function NetworkStatusBar() {
                 </>
               ) : isSyncing ? (
                 <>
-                  <span className="text-blue-900 font-bold">Syncing Data...</span>
+                  <span className="text-blue-900 font-bold">Syncing Database...</span>
+                </>
+              ) : !isRealSupabase ? (
+                <>
+                  <Database className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                  <span className="text-amber-900 font-bold">Local Storage Mode</span>
                 </>
               ) : (
                 <>
                   <Wifi className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                  <span className="text-white font-medium">Online</span>
+                  <span className="text-white font-medium">Database Connected</span>
                 </>
               )}
             </div>
@@ -226,11 +251,21 @@ export function NetworkStatusBar() {
           <span className="text-slate-400 dark:text-slate-500">•</span>
 
           {/* Detailed Message */}
-          <span className="text-[11px] font-medium text-slate-300">
+          <span className="text-[11px] font-medium">
             {!isOnline ? (
               <span className="text-amber-800">Changes stored locally in offline cache.</span>
             ) : isSyncing ? (
               <span className="text-blue-800 font-medium">Pushing queued changes to database...</span>
+            ) : !isRealSupabase ? (
+              <span className="text-amber-800 font-medium">
+                Db URL missing in env. Data saved locally in browser. 
+                <button 
+                  onClick={() => setShowDbModal(true)}
+                  className="underline ml-1 font-bold hover:text-amber-950 cursor-pointer"
+                >
+                  Configure Supabase Env
+                </button>
+              </span>
             ) : pendingCount > 0 ? (
               <span className="text-amber-300 font-semibold">{pendingCount} record{pendingCount === 1 ? "" : "s"} waiting to sync</span>
             ) : (
@@ -251,17 +286,37 @@ export function NetworkStatusBar() {
 
         {/* Action Controls */}
         <div className="flex items-center gap-2">
-          {isOnline && pendingCount > 0 && (
+          {isOnline && (
             <button
               type="button"
               onClick={triggerSync}
               disabled={isSyncing}
-              className="bg-blue-600 hover:bg-blue-500 text-white px-2.5 py-1 rounded text-[11px] font-bold transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-50"
+              className={cn(
+                "px-2.5 py-1 rounded text-[11px] font-bold transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-50",
+                !isRealSupabase
+                  ? "bg-amber-600 hover:bg-amber-700 text-white"
+                  : "bg-blue-600 hover:bg-blue-500 text-white"
+              )}
             >
               <RefreshCw className={cn("w-3 h-3", isSyncing && "animate-spin")} />
-              {isSyncing ? "Syncing..." : "Sync Database Now"}
+              {isSyncing ? "Syncing..." : isRealSupabase ? "Sync Database" : "Push Local Data"}
             </button>
           )}
+
+          <button
+            type="button"
+            onClick={() => setShowDbModal(true)}
+            className={cn(
+              "px-2 py-1 rounded text-[11px] font-medium transition-colors inline-flex items-center gap-1 cursor-pointer border",
+              !isRealSupabase
+                ? "bg-amber-100 border-amber-300 text-amber-900 font-bold hover:bg-amber-200"
+                : "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700 hover:text-white"
+            )}
+            title="Database Connection Config"
+          >
+            <Database className="w-3 h-3" />
+            <span className="hidden sm:inline">Database Config</span>
+          </button>
 
           <button
             type="button"
@@ -270,12 +325,104 @@ export function NetworkStatusBar() {
             title="Open Connection Simulator"
           >
             <Sliders className="w-3 h-3 text-slate-400" />
-            <span className="hidden sm:inline">Network Simulator</span>
+            <span className="hidden sm:inline">Simulator</span>
           </button>
         </div>
       </header>
 
-      {/* 2. Simulator Drawer/Modal */}
+      {/* 2. Database Setup & Migration Modal */}
+      {showDbModal && (
+        <div className="fixed inset-0 z-[1100] bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in">
+          <div className="bg-white rounded-2xl max-w-xl w-full shadow-2xl border border-slate-200 overflow-hidden text-slate-900">
+            <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between border-b border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <Database className="w-5 h-5 text-blue-400" />
+                <h3 className="font-bold text-base">Database Connection & Data Migration</h3>
+              </div>
+              <button 
+                onClick={() => setShowDbModal(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-5 max-h-[80vh] overflow-y-auto text-sm">
+              {/* Connection Status Box */}
+              <div className={cn(
+                "p-4 rounded-xl border flex items-start gap-3",
+                isRealSupabase 
+                  ? "bg-emerald-50 border-emerald-200 text-emerald-900" 
+                  : "bg-amber-50 border-amber-200 text-amber-900"
+              )}>
+                {isRealSupabase ? (
+                  <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+                ) : (
+                  <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                )}
+                <div>
+                  <h4 className="font-bold text-sm">
+                    {isRealSupabase ? "Supabase Database Connected" : "Local Storage Mode (No Database .env)"}
+                  </h4>
+                  <p className="text-xs mt-1 leading-relaxed">
+                    {isRealSupabase 
+                      ? "Your app is connected to live Supabase database. All campaign edits and drafts automatically sync."
+                      : "Environment variables VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are not configured. Data is currently safely stored in browser LocalStorage."
+                    }
+                  </p>
+                </div>
+              </div>
+
+              {/* Instructions for Vercel / Environment Variables */}
+              <div className="space-y-3">
+                <h4 className="font-bold text-slate-900 text-xs uppercase tracking-wider text-slate-500">
+                  Required Environment Variables (.env / Vercel)
+                </h4>
+                <div className="bg-slate-900 text-slate-200 p-3.5 rounded-xl font-mono text-xs space-y-1.5 border border-slate-800">
+                  <div className="text-emerald-400 font-semibold"># Add to .env or Vercel Environment Variables</div>
+                  <div><span className="text-blue-300">VITE_SUPABASE_URL</span>=https://your-project.supabase.co</div>
+                  <div><span className="text-blue-300">VITE_SUPABASE_ANON_KEY</span>=your-anon-public-key</div>
+                </div>
+              </div>
+
+              {/* Vercel Deployment Instructions */}
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs space-y-2 text-slate-700">
+                <p className="font-bold text-slate-900 flex items-center gap-1.5">
+                  <Server className="w-4 h-4 text-blue-600" />
+                  How to configure on Vercel:
+                </p>
+                <ol className="list-decimal pl-4 space-y-1 text-slate-600 leading-relaxed">
+                  <li>Go to your Vercel Project Dashboard → <strong>Settings</strong> → <strong>Environment Variables</strong>.</li>
+                  <li>Add <code>VITE_SUPABASE_URL</code> and <code>VITE_SUPABASE_ANON_KEY</code>.</li>
+                  <li>Click <strong>Redeploy</strong> in Vercel to activate the database connection.</li>
+                </ol>
+              </div>
+
+              {/* Data Safety & Migration Button */}
+              <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-3">
+                <div>
+                  <p className="font-bold text-xs text-slate-900">Push Local Storage to Database</p>
+                  <p className="text-[11px] text-slate-500">Upload all locally saved campaigns into database without losing anything.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await triggerSync();
+                    setShowDbModal(false);
+                  }}
+                  disabled={isSyncing}
+                  className="bg-blue-600 hover:bg-blue-700 text-white font-bold px-4 py-2 rounded-xl text-xs transition-colors shrink-0 inline-flex items-center gap-2 shadow-xs disabled:opacity-50"
+                >
+                  <CloudUpload className={cn("w-4 h-4", isSyncing && "animate-spin")} />
+                  {isSyncing ? "Syncing..." : "Sync All Local Data"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 3. Simulator Drawer/Modal */}
       {showSimulatorModal && (
         <div className="bg-slate-900 border-b border-slate-800 px-4 py-3 text-xs text-slate-200 flex items-center justify-between gap-4 animate-in slide-in-from-top-2">
           <div className="flex items-center gap-2">
@@ -324,7 +471,7 @@ export function NetworkStatusBar() {
         </div>
       )}
 
-      {/* 3. Floating Non-Intrusive Toast Notification */}
+      {/* 4. Floating Non-Intrusive Toast Notification */}
       {showToast && (
         <div className="fixed bottom-6 right-6 z-[1000] max-w-sm w-full px-2 pointer-events-auto transition-all duration-300 animate-in fade-in slide-in-from-bottom-5">
           <div className={cn(
@@ -375,3 +522,4 @@ export function NetworkStatusBar() {
     </>
   );
 }
+
