@@ -4,7 +4,7 @@ import { cn } from "@/lib/utils";
 import { supabase } from "@/lib/supabase";
 import { logAction } from "@/lib/logger";
 
-export function UsersList({ onLoginAsUser }: { onLoginAsUser?: (email: string, role: string) => void }) {
+export function UsersList() {
   const [users, setUsers] = useState<any[]>([]);
   const [isEditingUser, setIsEditingUser] = useState<string | null>(null);
   const [userForm, setUserForm] = useState({ name: "", email: "", role: "user", team: "", status: "active" });
@@ -325,32 +325,18 @@ export function UsersList({ onLoginAsUser }: { onLoginAsUser?: (email: string, r
                     <td className="px-6 py-3.5 text-slate-500 font-medium">{u.last_login || "Never"}</td>
                     <td className="px-6 py-3.5 text-right">
                       <div className="flex justify-end gap-1.5">
-                        {u.email !== "cbogineni@zetaglobal.com" && (
-                          <>
-                            <button onClick={() => toggleBanUser(u.id)} title={u.status === "banned" ? "Unban User" : "Ban User"} className={cn("p-1.5 rounded-lg transition-colors cursor-pointer", u.status === "banned" ? "text-emerald-600 hover:text-emerald-800 hover:bg-emerald-100" : "text-amber-600 hover:text-amber-800 hover:bg-amber-100")}>
-                              {u.status === "banned" ? <CheckCircle className="h-4 w-4" /> : <Ban className="h-4 w-4" />}
-                            </button>
-                            
-                            {onLoginAsUser && (
-                              <button onClick={() => onLoginAsUser(u.email, u.role)} title="Login as User" className="p-1.5 text-[#2b61d6] hover:text-blue-800 hover:bg-blue-100 rounded-lg transition-colors cursor-pointer">
-                                <LogIn className="h-4 w-4" />
-                              </button>
-                            )}
-                            <button onClick={() => editUser(u)} title="Edit User" className="p-1.5 text-slate-500 hover:text-slate-800 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer">
-                              <Pencil className="h-4 w-4" />
-                            </button>
-                            <button onClick={() => deleteUser(u.id)} title="Delete User" className="p-1.5 text-rose-500 hover:text-rose-700 hover:bg-rose-100 rounded-lg transition-colors cursor-pointer">
-                              <Trash2 className="h-4 w-4" />
-                            </button>
-                          </>
-                        )}
-                        {u.email === "cbogineni@zetaglobal.com" && onLoginAsUser && (
-                           <button onClick={() => onLoginAsUser(u.email, u.role)} title="Login as User" className="p-1.5 text-[#2b61d6] hover:text-blue-800 hover:bg-blue-100 rounded-lg transition-colors cursor-pointer">
-                              <LogIn className="h-4 w-4" />
-                           </button>
-                        )}
+                        <button onClick={() => toggleBanUser(u.id)} title={u.status === "banned" ? "Unban User" : "Ban User"} className={cn("p-1.5 rounded-lg transition-colors cursor-pointer", u.status === "banned" ? "text-emerald-600 hover:text-emerald-800 hover:bg-emerald-100" : "text-amber-600 hover:text-amber-800 hover:bg-amber-100")}>
+                          {u.status === "banned" ? <CheckCircle className="h-4 w-4" /> : <Ban className="h-4 w-4" />}
+                        </button>
+                        <button onClick={() => editUser(u)} title="Edit User" className="p-1.5 text-slate-500 hover:text-slate-800 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer">
+                          <Pencil className="h-4 w-4" />
+                        </button>
+                        <button onClick={() => deleteUser(u.id)} title="Delete User" className="p-1.5 text-rose-500 hover:text-rose-700 hover:bg-rose-100 rounded-lg transition-colors cursor-pointer">
+                          <Trash2 className="h-4 w-4" />
+                        </button>
                       </div>
                     </td>
+
                   </tr>
                 ))}
               </tbody>

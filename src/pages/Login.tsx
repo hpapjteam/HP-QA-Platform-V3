@@ -1,11 +1,11 @@
 import React, { useState } from "react";
-import { supabase } from "@/lib/supabase";
+import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
-import { Eye, EyeOff } from "lucide-react";
+import { Eye, EyeOff, AlertCircle } from "lucide-react";
 
-export function Login({ onLogin }: { onLogin: (role: string, email?: string) => void }) {
+export function Login({ onLogin }: { onLogin: () => void }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -13,6 +13,8 @@ export function Login({ onLogin }: { onLogin: (role: string, email?: string) => 
   const [error, setError] = useState<string | null>(null);
   const [isForgotPassword, setIsForgotPassword] = useState(false);
   const [resetSent, setResetSent] = useState(false);
+
+  const dbConfigured = isSupabaseConfigured();
 
   const handleForgotPassword = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -28,74 +30,34 @@ export function Login({ onLogin }: { onLogin: (role: string, email?: string) => 
       if (!response.ok) throw new Error("Failed to send reset email");
       setResetSent(true);
     } catch (err: any) {
-      setError(err.message);
+      setError(err.message || "Error sending reset email");
     }
     setLoading(false);
   };
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!dbConfigured) {
+      setError("Database is not connected. Please configure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.");
+      return;
+    }
+
     setLoading(true);
     setError(null);
     
-    // Check if user has configured Supabase yet
-    if (import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_URL !== 'https://placeholder.supabase.co') {
-      let { error: signInError, data } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      });
+    const { error: signInError } = await supabase.auth.signInWithPassword({
+      email: email.trim(),
+      password,
+    });
 
-      // If sign in fails and it's one of the mock users, try to sign them up to "save" them in Supabase
-      if (signInError) {
-        let role = "user";
-        if (email === "cbogineni@zetaglobal.com" && password === "Zeta@Admin") {
-          role = "admin";
-        } else if (email === "cbogineni@gmail.com" && password === "Zeta@user") {
-          role = "user";
-        } else {
-          setError(signInError.message);
-          setLoading(false);
-          return;
-        }
-
-        // Attempt to create the user in Supabase
-        const { error: signUpError, data: signUpData } = await supabase.auth.signUp({
-          email,
-          password,
-          options: {
-            data: {
-              role: role,
-            }
-          }
-        });
-
-        if (signUpError) {
-          setError(signUpError.message);
-          setLoading(false);
-          return;
-        }
-
-        data = signUpData;
-      }
-      
-      onLogin(data.user?.user_metadata?.role || "user", email);
-    } else {
-      // Mock login for specifically requested users if no Supabase
-      const usersRaw = localStorage.getItem("platform_users");
-      const users = usersRaw ? JSON.parse(usersRaw) : [];
-      const foundUser = users.find((u: any) => u.email === email);
-
-      if (foundUser) {
-        onLogin(foundUser.role, email);
-      } else if (email === "cbogineni@zetaglobal.com" && password === "Zeta@Admin") {
-        onLogin("admin", email);
-      } else if (email === "cbogineni@gmail.com" && password === "Zeta@user") {
-        onLogin("user", email);
-      } else {
-        setError("Invalid credentials. Please use the mock credentials provided.");
-      }
+    if (signInError) {
+      setError(signInError.message || "Invalid login credentials");
+      setLoading(false);
+      return;
     }
+    
     setLoading(false);
+    onLogin();
   };
 
   return (
@@ -117,6 +79,16 @@ export function Login({ onLogin }: { onLogin: (role: string, email?: string) => 
           <h1 className="text-3xl font-bold text-slate-900 mb-8 text-center">
             {isForgotPassword ? "Reset Password" : "Welcome"}
           </h1>
+
+          {!dbConfigured && (
+            <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 text-xs flex items-start gap-2.5">
+              <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+              <div>
+                <strong className="font-bold text-slate-900 block mb-1">Database Disconnected</strong>
+                You must add your Supabase Database environment variables to log in.
+              </div>
+            </div>
+          )}
           
           {isForgotPassword ? (
             resetSent ? (
@@ -140,7 +112,7 @@ export function Login({ onLogin }: { onLogin: (role: string, email?: string) => 
                   <Input
                     id="email"
                     type="email"
-                    placeholder="cbogineni@zetaglobal.com"
+                    placeholder="user@example.com"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     required
@@ -170,7 +142,7 @@ export function Login({ onLogin }: { onLogin: (role: string, email?: string) => 
                 <Input
                   id="email"
                   type="email"
-                  placeholder="cbogineni@zetaglobal.com"
+                  placeholder="user@example.com"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   required
@@ -201,7 +173,7 @@ export function Login({ onLogin }: { onLogin: (role: string, email?: string) => 
                 <button type="button" onClick={() => setIsForgotPassword(true)} className="text-sm text-[#2b61d6] hover:underline font-medium">
                   Forgot password?
                 </button>
-                <Button type="submit" className="bg-[#2b61d6] hover:bg-blue-700 text-white px-8 h-10 shadow-sm" disabled={loading}>
+                <Button type="submit" className="bg-[#2b61d6] hover:bg-blue-700 text-white px-8 h-10 shadow-sm" disabled={loading || !dbConfigured}>
                   {loading ? "Logging in..." : "Log in"}
                 </Button>
               </div>
@@ -221,23 +193,16 @@ export function Login({ onLogin }: { onLogin: (role: string, email?: string) => 
            backgroundImage: `url('https://zetaglobal.com/wp-content/uploads/2025/07/life-at-zeta-hero.png')`,
            backgroundSize: 'cover',
            backgroundPosition: 'center',
-           /*mixBlendMode: luminosity*/
          }}></div>
          
-         
-
-         
-
          <div className="absolute inset-0 flex flex-col justify-end p-16 pb-24">
             <div className="text-white text-left max-w-lg z-10 drop-shadow-md">
                <h2 className="text-4xl font-bold mb-4">Empower your QA Workflow</h2>
                <p className="text-lg text-blue-100">Automate validations, streamline approvals, and launch campaigns with absolute confidence.</p>
             </div>
          </div>
-         
-         
-         
       </div>
     </div>
   );
 }
+

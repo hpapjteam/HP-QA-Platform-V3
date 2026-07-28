@@ -6,11 +6,12 @@ import { CampaignSetup } from "./pages/CampaignSetup";
 import { Campaigns } from "./pages/Campaigns";
 import { Login } from "./pages/Login";
 import { Signup } from "./pages/Signup";
-import { supabase } from "@/lib/supabase";
+import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { Settings } from "./pages/Settings";
 import { UsersList } from "./pages/Users";
 import { Checklists } from "./pages/Checklists";
 import { Reports } from "./pages/Reports";
+import { DatabaseRequirementScreen } from "./components/DatabaseRequirementScreen";
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
@@ -18,65 +19,58 @@ export default function App() {
   const [userEmail, setUserEmail] = useState<string>("");
   const [isLoading, setIsLoading] = useState(true);
 
+  const dbConnected = isSupabaseConfigured();
+
   useEffect(() => {
-    // Ensure demo localStorage items are cleared so UI uses actual DB
+    // Clear legacy mock auth storage
+    localStorage.removeItem("mockAuth");
+    localStorage.removeItem("mockAuthEmail");
     localStorage.removeItem("platform_users");
-    localStorage.removeItem("settings_teams");
-    localStorage.removeItem("settings_countries");
-    localStorage.removeItem("platform_campaigns");
 
-    // Check active session for Supabase (if configured)
-    if (import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_URL !== 'https://placeholder.supabase.co') {
-      supabase.auth.getSession().then(({ data: { session } }) => {
-        if (session) {
-          setIsAuthenticated(true);
-          setUserRole(session.user?.email === "bchaithanyababu@gmail.com" ? "admin" : (session.user?.user_metadata?.role || "user"));
-          setUserEmail(session.user?.email || "");
-        }
-        setIsLoading(false);
-      });
+    if (!dbConnected) {
+      setIsLoading(false);
+      return;
+    }
 
-      const {
-        data: { subscription },
-      } = supabase.auth.onAuthStateChange((_event, session) => {
-        setIsAuthenticated(!!session);
-        if (session) {
-           setUserRole(session.user?.email === "bchaithanyababu@gmail.com" ? "admin" : (session.user?.user_metadata?.role || "user"));
-           setUserEmail(session.user?.email || "");
-        }
-      });
-
-      return () => subscription.unsubscribe();
-    } else {
-      // Mock auth setup
-      const storedAuth = localStorage.getItem("mockAuth");
-      const storedEmail = localStorage.getItem("mockAuthEmail");
-      if (storedAuth) {
+    // Check active session in Supabase Auth
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session) {
         setIsAuthenticated(true);
-        setUserRole(storedAuth);
-        setUserEmail(storedEmail || "");
+        setUserRole(session.user?.user_metadata?.role || "user");
+        setUserEmail(session.user?.email || "");
       }
       setIsLoading(false);
-    }
-  }, []);
+    });
 
-  const handleMockLogin = (role: string, email?: string) => {
-    setIsAuthenticated(true);
-    setUserRole(role);
-    setUserEmail(email || "");
-    localStorage.setItem("mockAuth", role);
-    if (email) {
-      localStorage.setItem("mockAuthEmail", email);
-    }
-  };
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setIsAuthenticated(!!session);
+      if (session) {
+        setUserRole(session.user?.user_metadata?.role || "user");
+        setUserEmail(session.user?.email || "");
+      } else {
+        setUserRole("user");
+        setUserEmail("");
+      }
+    });
 
-  const handleLoginAsUser = (email: string, role: string) => {
-    handleMockLogin(role, email);
-    window.location.href = "/";
-  };
+    return () => subscription.unsubscribe();
+  }, [dbConnected]);
+
+  if (!dbConnected) {
+    return <DatabaseRequirementScreen />;
+  }
 
   if (isLoading) {
-    return <div className="flex h-screen items-center justify-center">Loading...</div>;
+    return (
+      <div className="flex h-screen w-screen items-center justify-center bg-slate-900 text-white font-sans text-sm">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+          <p className="text-slate-400 font-medium">Verifying database session...</p>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -85,7 +79,7 @@ export default function App() {
         {!isAuthenticated ? (
           <>
             <Route path="/signup" element={<Signup />} />
-            <Route path="*" element={<Login onLogin={handleMockLogin} />} />
+            <Route path="*" element={<Login onLogin={() => setIsAuthenticated(true)} />} />
           </>
         ) : (
           <Route path="/" element={<AppLayout role={userRole} />}>
@@ -93,7 +87,7 @@ export default function App() {
             <Route path="campaigns/new" element={<CampaignSetup userEmail={userEmail} />} />
             <Route path="campaigns" element={<Campaigns userEmail={userEmail} userRole={userRole} />} />
             <Route path="reports" element={<Reports />} />
-            <Route path="users" element={userRole === "admin" ? <UsersList onLoginAsUser={handleLoginAsUser} /> : <Navigate to="/" replace />} />
+            <Route path="users" element={userRole === "admin" ? <UsersList /> : <Navigate to="/" replace />} />
             <Route path="settings" element={userRole === "admin" ? <Settings role={userRole} /> : <Navigate to="/" replace />} />
             <Route path="checklists" element={userRole === "admin" ? <Checklists role={userRole} /> : <Navigate to="/" replace />} />
             <Route path="*" element={<Navigate to="/" replace />} />
@@ -103,3 +97,4 @@ export default function App() {
     </Router>
   );
 }
+

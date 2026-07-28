@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { useSearchParams, useNavigate, Link } from "react-router-dom";
 import { Lock, User, Shield, CheckCircle } from "lucide-react";
-import { supabase } from "@/lib/supabase";
+import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 
 export function Signup() {
   const [searchParams] = useSearchParams();
@@ -18,7 +18,6 @@ export function Signup() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
 
-  // If no email is provided via invite link, we can show an error or redirect
   useEffect(() => {
     if (!email) {
       setError("Invalid invitation link. No email provided.");
@@ -28,6 +27,11 @@ export function Signup() {
   const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email) return;
+
+    if (!isSupabaseConfigured()) {
+      setError("Database is not connected. Please configure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.");
+      return;
+    }
     
     if (password !== confirmPassword) {
       setError("Passwords do not match");
@@ -38,23 +42,29 @@ export function Signup() {
     setError(null);
 
     try {
-      if (import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_URL !== 'https://placeholder.supabase.co') {
-        const { error: signUpError } = await supabase.auth.signUp({
-          email,
-          password,
-          options: {
-            data: {
-              name,
-              team,
-              role,
-            }
+      const { error: signUpError } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: {
+            name,
+            team,
+            role,
           }
-        });
+        }
+      });
 
-        if (signUpError) throw signUpError;
-      } else {
+      if (signUpError) throw signUpError;
 
-      }
+      // Create app_users row in database
+      await supabase.from('app_users').insert([{
+        name,
+        email,
+        role,
+        team,
+        status: 'active',
+        last_login: new Date().toISOString()
+      }]);
 
       setSuccess(true);
       setTimeout(() => {
@@ -66,6 +76,7 @@ export function Signup() {
       setLoading(false);
     }
   };
+
 
   if (success) {
     return (

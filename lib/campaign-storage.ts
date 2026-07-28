@@ -1,4 +1,4 @@
-import { supabase } from "@/lib/supabase";
+import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { logAction } from "@/lib/logger";
 
 export interface FolderItem {
@@ -228,66 +228,60 @@ function mapSupabaseToCampaignRecord(item: any): CampaignRecord {
 }
 
 /**
- * Gets all campaigns from Supabase and LocalStorage.
+ * Gets all campaigns from Supabase (single source of truth).
  */
 export async function getAllCampaigns(): Promise<CampaignRecord[]> {
-  let combined: CampaignRecord[] = [];
-  const isRealSupabase = Boolean(
-    import.meta.env.VITE_SUPABASE_URL && 
-    import.meta.env.VITE_SUPABASE_URL !== 'https://placeholder.supabase.co'
-  );
+  const isRealSupabase = isSupabaseConfigured();
 
-  try {
-    if (isRealSupabase) {
-      const { data, error } = await supabase.from("campaigns").select("*").order("updated_at", { ascending: false });
+  if (isRealSupabase) {
+    try {
+      const { data, error } = await supabase
+        .from("campaigns")
+        .select("*")
+        .order("updated_at", { ascending: false });
+
       if (!error && data) {
-        combined = data.map(mapSupabaseToCampaignRecord);
+        const mapped = data.map(mapSupabaseToCampaignRecord);
+        // Cache locally for offline availability
+        try {
+          localStorage.setItem("local_campaigns", JSON.stringify(mapped));
+        } catch (e) {}
+        
+        if (mapped.length > 0) {
+          return mapped;
+        }
+
+        // Fresh database: check if we have local campaigns to sync, or populate default seeds into DB
+        const localRaw = localStorage.getItem("local_campaigns");
+        const localItems: CampaignRecord[] = localRaw ? JSON.parse(localRaw) : [...INITIAL_SEED_CAMPAIGNS];
+        if (localItems.length > 0) {
+          await syncAllCampaignsToDatabase(localItems);
+          const reFetch = await supabase.from("campaigns").select("*").order("updated_at", { ascending: false });
+          if (!reFetch.error && reFetch.data) {
+            return reFetch.data.map(mapSupabaseToCampaignRecord);
+          }
+        }
+        return mapped;
       }
+    } catch (err) {
+      console.error("[CampaignStorage] Error fetching from Supabase:", err);
     }
-  } catch (err) {
-    console.error("[CampaignStorage] Error fetching from Supabase:", err);
   }
 
+  // Fallback to local storage only if offline
   try {
     const localRaw = localStorage.getItem("local_campaigns");
-    let localItems: CampaignRecord[] = localRaw ? JSON.parse(localRaw) : [];
-
-    if (localItems.length === 0 && combined.length === 0) {
-      localItems = [...INITIAL_SEED_CAMPAIGNS];
-      localStorage.setItem("local_campaigns", JSON.stringify(localItems));
-    }
-
-    localItems.forEach((item) => {
-      const mappedItem = mapSupabaseToCampaignRecord(item);
-      const idx = combined.findIndex((c) => String(c.id) === String(mappedItem.id));
-      if (idx === -1) {
-        combined.push(mappedItem);
-      } else {
-        const remoteTime = new Date(combined[idx].updated_at || 0).getTime();
-        const localTime = new Date(mappedItem.updated_at || 0).getTime();
-        if (localTime >= remoteTime) {
-          combined[idx] = { ...combined[idx], ...mappedItem };
-        }
-      }
-    });
-
-    // Save consolidated items to local storage
-    localStorage.setItem("local_campaigns", JSON.stringify(combined));
-
-    // Auto-populate to Supabase if connected and online so migration/sync happens seamlessly
-    if (isRealSupabase && typeof navigator !== 'undefined' && navigator.onLine) {
-      syncAllCampaignsToDatabase(combined).catch(e => console.warn("[CampaignStorage] Background migration sync warning:", e));
+    if (localRaw) {
+      const parsed: CampaignRecord[] = JSON.parse(localRaw);
+      return parsed.map(mapSupabaseToCampaignRecord);
     }
   } catch (e) {
-    console.error("[CampaignStorage] Error parsing local_campaigns:", e);
+    console.error("[CampaignStorage] Error reading local_campaigns:", e);
   }
 
-  if (combined.length === 0) {
-    combined = [...INITIAL_SEED_CAMPAIGNS];
-  }
-
-  return combined;
+  return INITIAL_SEED_CAMPAIGNS;
 }
+
 
 /**
  * Syncs/Populates all given campaign records to Supabase database.
