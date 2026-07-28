@@ -3,7 +3,7 @@ import { Plus, Trash2, Edit2, CheckCircle2, ChevronUp, ChevronDown } from "lucid
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { supabase } from "@/lib/supabase";
+import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 
 export interface ChecklistItem {
   id: string;
@@ -28,8 +28,10 @@ export function Checklists({ role }: { role: string }) {
   const [teams, setTeams] = useState<string[]>(["HP-APJ", "HP-EMEA", "HP-AMS"]);
 
   useEffect(() => {
+    const isDb = isSupabaseConfigured();
+
     const fetchTeams = async () => {
-      if (import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_URL !== 'https://placeholder.supabase.co') {
+      if (isDb) {
         const { data } = await supabase.from('teams').select('*').order('created_at', { ascending: true });
         if (data && data.length > 0) {
           const teamNames = data.map(t => t.name);
@@ -42,36 +44,78 @@ export function Checklists({ role }: { role: string }) {
     };
     fetchTeams();
 
-    // Load from local storage
-    const stored = localStorage.getItem("platform_checklists");
-    if (stored) {
-      setChecklists(JSON.parse(stored));
-    } else {
-      // Default checklists
-      const defaults = [
-        {
-          team: "HP-APJ",
-          items: [
-            { id: "1", text: "Verify APJ specific legal compliance", stage: 0 },
-            { id: "2", text: "Check translations for APAC regions", stage: 0 }
-          ]
-        },
-        {
-          team: "HP-EMEA",
-          items: [
-            { id: "3", text: "Ensure GDPR compliance points are met", stage: 0 },
-            { id: "4", text: "Verify EMEA pricing formats", stage: 0 }
-          ]
+    const fetchChecklists = async () => {
+      if (isDb) {
+        const { data, error } = await supabase.from('checklists').select('*');
+        if (!error && data && data.length > 0) {
+          const loaded: TeamChecklist[] = data.map((row: any) => ({
+            team: row.team,
+            items: row.items || []
+          }));
+          setChecklists(loaded);
+          localStorage.setItem("platform_checklists", JSON.stringify(loaded));
+          return;
         }
-      ];
-      setChecklists(defaults);
-      localStorage.setItem("platform_checklists", JSON.stringify(defaults));
-    }
+      }
+
+      // Load from local storage or defaults
+      const stored = localStorage.getItem("platform_checklists");
+      if (stored) {
+        setChecklists(JSON.parse(stored));
+      } else {
+        const defaults: TeamChecklist[] = [
+          {
+            team: "HP-APJ",
+            items: [
+              { id: "1", text: "Verify APJ specific legal compliance", stage: 0 },
+              { id: "2", text: "Check translations for APAC regions", stage: 0 }
+            ]
+          },
+          {
+            team: "HP-EMEA",
+            items: [
+              { id: "3", text: "Ensure GDPR compliance points are met", stage: 0 },
+              { id: "4", text: "Verify EMEA pricing formats", stage: 0 }
+            ]
+          }
+        ];
+        setChecklists(defaults);
+        localStorage.setItem("platform_checklists", JSON.stringify(defaults));
+
+        if (isDb) {
+          // Push defaults to DB
+          for (const item of defaults) {
+            await supabase.from('checklists').upsert({
+              id: item.team,
+              team: item.team,
+              title: `${item.team} Checklist`,
+              items: item.items,
+              updated_at: new Date().toISOString()
+            });
+          }
+        }
+      }
+    };
+
+    fetchChecklists();
   }, []);
 
-  const saveChecklists = (newChecklists: TeamChecklist[]) => {
+  const saveChecklists = async (newChecklists: TeamChecklist[]) => {
     setChecklists(newChecklists);
     localStorage.setItem("platform_checklists", JSON.stringify(newChecklists));
+
+    if (isSupabaseConfigured()) {
+      const activeObj = newChecklists.find(c => c.team === activeTeam);
+      if (activeObj) {
+        await supabase.from('checklists').upsert({
+          id: activeTeam,
+          team: activeTeam,
+          title: `${activeTeam} Checklist`,
+          items: activeObj.items,
+          updated_at: new Date().toISOString()
+        });
+      }
+    }
   };
 
   const activeChecklist = checklists.find(c => c.team === activeTeam) || { team: activeTeam, items: [] };

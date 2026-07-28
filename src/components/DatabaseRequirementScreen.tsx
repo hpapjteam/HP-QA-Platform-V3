@@ -91,6 +91,17 @@ export function DatabaseRequirementScreen({ onRetry }: { onRetry?: () => void })
                 Create a <code className="text-emerald-300 bg-slate-900 px-1.5 py-0.5 rounded font-mono">.env</code> file in the project root directory with your Supabase credentials, then restart the server.
               </p>
             </div>
+
+            {/* SQL Setup Steps */}
+            <div className="bg-slate-950 rounded-2xl p-5 border border-slate-800 space-y-3">
+              <div className="font-bold text-slate-200 text-sm flex items-center gap-2">
+                <span className="w-5 h-5 rounded-full bg-purple-600 text-white text-xs flex items-center justify-center font-bold">3</span>
+                Create Supabase Database Tables
+              </div>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                Open <a href="https://supabase.com/dashboard" target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">Supabase SQL Editor</a>, copy and paste the contents of <code className="text-purple-300 bg-slate-900 px-1.5 py-0.5 rounded font-mono">supabase_schema.sql</code>, and click <strong>Run</strong> to generate all tables (<code className="text-slate-400 font-mono">campaigns</code>, <code className="text-slate-400 font-mono">app_users</code>, <code className="text-slate-400 font-mono">teams</code>, <code className="text-slate-400 font-mono">countries</code>, <code className="text-slate-400 font-mono">activity_logs</code>).
+              </p>
+            </div>
           </div>
 
           {/* Refresh / Check Again Button */}
