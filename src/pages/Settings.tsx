@@ -125,7 +125,6 @@ export function Settings({ role }: { role: string }) {
   };
 
   const deleteCountry = async (id: string) => {
-    if (!window.confirm("Are you sure you want to delete this country?")) return;
     const { error } = await supabase.from('countries').delete().eq('id', id);
     if (!error) {
       setCountries(countries.filter(c => c.id !== id));
@@ -152,7 +151,6 @@ export function Settings({ role }: { role: string }) {
   };
 
   const deleteTeam = async (id: string) => {
-    if (!window.confirm("Are you sure you want to delete this team?")) return;
     const { error } = await supabase.from('teams').delete().eq('id', id);
     if (!error) {
       setTeams(teams.filter(t => t.id !== id));

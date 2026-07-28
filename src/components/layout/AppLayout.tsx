@@ -1,16 +1,18 @@
 import { Outlet, useLocation } from "react-router-dom";
 import { Sidebar } from "./Sidebar";
 import { SessionManager } from "../SessionManager";
+import { NetworkStatusBar } from "../NetworkStatusBar";
 
 export function AppLayout({ role }: { role: string }) {
   const location = useLocation();
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-slate-50 text-slate-900 font-sans">
+    <div className="flex h-screen w-screen overflow-hidden bg-slate-50 text-slate-900 font-sans relative">
       <SessionManager />
       <Sidebar role={role} />
-      <main className="flex-1 flex flex-col relative overflow-hidden bg-white">
-        <div className="flex-1 overflow-y-auto overflow-x-hidden z-10">
+      <main className="flex-1 flex flex-col relative overflow-y-auto overflow-x-auto min-w-0 bg-white">
+        <NetworkStatusBar />
+        <div className="flex-1 flex flex-col min-w-0 z-10">
           <Outlet />
         </div>
       </main>

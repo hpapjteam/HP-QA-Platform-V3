@@ -30,10 +30,10 @@ export function QAWizard({
   children
 }: QAWizardProps) {
   return (
-    <div className="flex flex-col flex-1 overflow-hidden">
+    <div className="flex flex-col flex-1 min-h-0 overflow-y-auto">
       {/* Wizard Header / Step Indicator */}
-      <div className="px-6 md:px-8 py-3 bg-white border-b border-slate-200 shrink-0 shadow-2xs">
-        <div className="w-full flex items-center justify-between mb-3">
+      <div className="px-4 md:px-8 py-3 bg-white border-b border-slate-200 shrink-0 shadow-2xs">
+        <div className="w-full flex items-center justify-between mb-3 overflow-x-auto pb-1 min-w-0 scrollbar-none gap-2">
           {steps.map((step, index) => {
             const stepNum = index + 1;
             const isCompleted = currentStep > stepNum;
@@ -41,10 +41,10 @@ export function QAWizard({
 
             return (
               <React.Fragment key={step.id}>
-                <div className="flex items-center gap-2.5">
+                <div className="flex items-center gap-2 shrink-0">
                   <div
                     className={cn(
-                      "w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold transition-all",
+                      "w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold transition-all shrink-0",
                       isCompleted
                         ? "bg-emerald-600 text-white"
                         : isCurrent
@@ -56,7 +56,7 @@ export function QAWizard({
                   </div>
                   <span
                     className={cn(
-                      "text-xs font-semibold tracking-tight",
+                      "text-xs font-semibold tracking-tight whitespace-nowrap",
                       isCurrent ? "text-slate-900 font-bold" : isCompleted ? "text-slate-700" : "text-slate-400"
                     )}
                   >
@@ -64,7 +64,7 @@ export function QAWizard({
                   </span>
                 </div>
                 {index < steps.length - 1 && (
-                  <div className={cn("h-0.5 flex-1 mx-4 transition-colors", stepNum < currentStep ? "bg-emerald-500" : "bg-slate-200")} />
+                  <div className={cn("h-0.5 min-w-[20px] flex-1 mx-2 transition-colors shrink-0", stepNum < currentStep ? "bg-emerald-500" : "bg-slate-200")} />
                 )}
               </React.Fragment>
             );
@@ -81,14 +81,14 @@ export function QAWizard({
       </div>
 
       {/* Main Step Content */}
-      <div className="flex-1 overflow-y-auto p-4 md:p-6 bg-slate-100/60 flex flex-col">
-        <div className="w-full flex-1 flex flex-col">
+      <div className="flex-1 p-3 md:p-6 bg-slate-100/60 flex flex-col overflow-y-auto min-h-0">
+        <div className="w-full flex-1 flex flex-col min-h-0">
           {children}
         </div>
       </div>
 
       {/* Wizard Footer Controls */}
-      <div className="h-16 px-8 bg-white border-t border-slate-200 shrink-0 flex items-center justify-between shadow-2xs">
+      <div className="h-16 px-4 md:px-8 bg-white border-t border-slate-200 shrink-0 flex items-center justify-between shadow-2xs sticky bottom-0 z-20">
         <Button
           type="button"
           variant="outline"

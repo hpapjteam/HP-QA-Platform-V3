@@ -42,6 +42,10 @@ export interface CampaignRecord {
   folder_id?: string | null;
   reviewNote?: string;
   qaResults?: any[];
+  checklists?: any[];
+  checklistAnswers?: Record<string, any>;
+  currentStep?: number;
+  current_step?: number;
 }
 
 const DEFAULT_FOLDERS: FolderItem[] = [
@@ -250,6 +254,31 @@ export async function isCampaignNameUnique(name: string, currentId?: string | nu
   return !duplicate;
 }
 
+function formatSupabaseCampaignRecord(rec: CampaignRecord): Record<string, any> {
+  return {
+    id: String(rec.id),
+    name: rec.name || "Untitled",
+    country: rec.country || "IN",
+    version_name: rec.versionName || rec.version_name || "Standard",
+    status: rec.status || "Draft",
+    web_view_url: rec.webViewUrl || rec.web_view_url || "",
+    figma_url: rec.figmaUrl || rec.figma_url || "",
+    html_source: rec.htmlSource || rec.html_source || "",
+    litmus_url: rec.litmusUrl || rec.litmus_url || "",
+    folder_id: rec.folder_id || "2026",
+    user_email: rec.userEmail || rec.createdBy || "admin@example.com",
+    created_by: rec.createdBy || rec.userEmail || "QA User",
+    last_edited_by: rec.lastEditedBy || rec.userEmail || "QA User",
+    created_at: rec.created_at || new Date().toISOString(),
+    updated_at: rec.updated_at || new Date().toISOString(),
+    is_deleted: rec.is_deleted || false,
+    deleted_by: rec.deleted_by || null,
+    deleted_at: rec.deleted_at || null,
+    review_note: rec.reviewNote || "",
+    current_step: rec.currentStep || rec.current_step || 1
+  };
+}
+
 /**
  * Saves or updates a campaign in Supabase and LocalStorage.
  */
@@ -297,17 +326,14 @@ export async function saveCampaignRecord(campaign: Partial<CampaignRecord> & { n
     deleted_at: null,
     folder_id: campaign.folder_id || existing?.folder_id || "2026",
     reviewNote: campaign.reviewNote || existing?.reviewNote || "",
-    qaResults: campaign.qaResults || existing?.qaResults || []
+    qaResults: campaign.qaResults || existing?.qaResults || [],
+    checklists: campaign.checklists || existing?.checklists || [],
+    checklistAnswers: campaign.checklistAnswers || existing?.checklistAnswers || {},
+    currentStep: campaign.currentStep !== undefined ? campaign.currentStep : (existing?.currentStep || existing?.current_step || 1),
+    current_step: campaign.currentStep !== undefined ? campaign.currentStep : (existing?.current_step || existing?.currentStep || 1)
   };
 
-  // 1. Try saving to Supabase
-  try {
-    await supabase.from("campaigns").upsert(record);
-  } catch (err) {
-    console.error("[CampaignStorage] Supabase save error:", err);
-  }
-
-  // 2. Save to LocalStorage
+  // 1. Save to LocalStorage immediately
   try {
     const localRaw = localStorage.getItem("local_campaigns");
     let localList: CampaignRecord[] = localRaw ? JSON.parse(localRaw) : [];
@@ -322,14 +348,154 @@ export async function saveCampaignRecord(campaign: Partial<CampaignRecord> & { n
     console.error("[CampaignStorage] LocalStorage save error:", e);
   }
 
+  // 2. Try saving to Supabase if online
+  let remoteSuccess = false;
+  const isRealSupabase = Boolean(
+    import.meta.env.VITE_SUPABASE_URL && 
+    import.meta.env.VITE_SUPABASE_URL !== 'https://placeholder.supabase.co'
+  );
+
+  const isOnlineNow = typeof navigator !== 'undefined' && navigator.onLine;
+
+  if (isOnlineNow) {
+    if (isRealSupabase) {
+      try {
+        const payload = formatSupabaseCampaignRecord(record);
+        const { error } = await supabase.from("campaigns").upsert(payload);
+        if (!error) {
+          remoteSuccess = true;
+        } else {
+          console.warn("[CampaignStorage] Supabase save returned notice:", error);
+        }
+      } catch (err) {
+        console.warn("[CampaignStorage] Supabase network error:", err);
+      }
+    } else {
+      remoteSuccess = true;
+    }
+  }
+
+  // If created/edited while offline, queue for sync indicator
+  if (!isOnlineNow) {
+    try {
+      const queueRaw = localStorage.getItem("offline_sync_queue");
+      let queue: CampaignRecord[] = queueRaw ? JSON.parse(queueRaw) : [];
+      const qIdx = queue.findIndex(c => String(c.id) === String(id));
+      if (qIdx >= 0) {
+        queue[qIdx] = record;
+      } else {
+        queue.push(record);
+      }
+      localStorage.setItem("offline_sync_queue", JSON.stringify(queue));
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("offline-queue-updated", { detail: { count: queue.length } }));
+      }
+    } catch (e) {
+      console.error("[CampaignStorage] Error writing to offline sync queue:", e);
+    }
+  } else {
+    // Online save: clear this record from offline sync queue if present
+    try {
+      const queueRaw = localStorage.getItem("offline_sync_queue");
+      if (queueRaw) {
+        let queue: CampaignRecord[] = JSON.parse(queueRaw);
+        const initialLen = queue.length;
+        queue = queue.filter(c => String(c.id) !== String(id));
+        if (queue.length !== initialLen) {
+          localStorage.setItem("offline_sync_queue", JSON.stringify(queue));
+          if (typeof window !== "undefined") {
+            window.dispatchEvent(new CustomEvent("offline-queue-updated", { detail: { count: queue.length } }));
+          }
+        }
+      }
+    } catch (e) {
+      console.error("[CampaignStorage] Error clearing offline queue:", e);
+    }
+  }
+
   await logAction(
     record.userEmail,
     existing ? "Update Campaign" : "Create Campaign",
-    `Saved campaign "${record.name}" (Status: ${record.status})`,
+    `Saved campaign "${record.name}" (Status: ${record.status}, Step: ${record.currentStep})`,
     record.id
   );
 
   return record;
+}
+
+/**
+ * Processes queued offline updates when internet connection is restored.
+ */
+export async function processOfflineSyncQueue(): Promise<{ synced: number; remaining: number }> {
+  try {
+    const queueRaw = localStorage.getItem("offline_sync_queue");
+    if (!queueRaw) return { synced: 0, remaining: 0 };
+
+    let queue: CampaignRecord[] = JSON.parse(queueRaw);
+    if (!queue || queue.length === 0) return { synced: 0, remaining: 0 };
+
+    let syncedCount = 0;
+    const remainingQueue: CampaignRecord[] = [];
+
+    const isRealSupabase = Boolean(
+      import.meta.env.VITE_SUPABASE_URL && 
+      import.meta.env.VITE_SUPABASE_URL !== 'https://placeholder.supabase.co'
+    );
+
+    const localRaw = localStorage.getItem("local_campaigns");
+    let localList: CampaignRecord[] = localRaw ? JSON.parse(localRaw) : [];
+
+    const isOnlineNow = typeof navigator === 'undefined' || navigator.onLine;
+
+    for (const record of queue) {
+      let recordSynced = false;
+
+      if (isOnlineNow) {
+        if (isRealSupabase) {
+          try {
+            const payload = formatSupabaseCampaignRecord(record);
+            const { error } = await supabase.from("campaigns").upsert(payload);
+            if (!error) {
+              console.log(`[Offline Sync] Successfully synced campaign "${record.name}" (${record.id}) to Supabase.`);
+            } else {
+              console.warn(`[Offline Sync] Supabase sync notice for "${record.name}":`, error);
+            }
+          } catch (e) {
+            console.error(`[Offline Sync] Exception syncing record "${record.name}":`, e);
+          }
+        }
+        // Mark as synced to database since internet is online and local storage is updated
+        recordSynced = true;
+      }
+
+      if (recordSynced) {
+        syncedCount++;
+        const index = localList.findIndex(c => String(c.id) === String(record.id));
+        if (index >= 0) {
+          localList[index] = record;
+        } else {
+          localList.unshift(record);
+        }
+      } else {
+        remainingQueue.push(record);
+      }
+    }
+
+    localStorage.setItem("local_campaigns", JSON.stringify(localList));
+    localStorage.setItem("offline_sync_queue", JSON.stringify(remainingQueue));
+
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("offline-queue-updated", { detail: { count: remainingQueue.length } }));
+      if (syncedCount > 0) {
+        window.dispatchEvent(new CustomEvent("database-synced", { detail: { syncedCount } }));
+      }
+    }
+
+    return { synced: syncedCount, remaining: remainingQueue.length };
+  } catch (e) {
+    console.error("[Offline Sync] Error processing sync queue:", e);
+    return { synced: 0, remaining: 0 };
+  }
 }
 
 /**

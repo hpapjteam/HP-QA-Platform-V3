@@ -13,6 +13,7 @@ import {
   CampaignRecord, 
   FolderItem 
 } from "@/lib/campaign-storage";
+import { getCampaignCheckpointProgress } from "@/lib/checklist-utils";
 import { logAction } from "@/lib/logger";
 import { supabase } from "@/lib/supabase";
 import { 
@@ -106,6 +107,15 @@ export function Campaigns({ userEmail = "admin@example.com", userRole }: { userE
 
   useEffect(() => {
     loadData();
+
+    const handleSynced = () => {
+      loadData();
+    };
+
+    window.addEventListener("database-synced", handleSynced);
+    return () => {
+      window.removeEventListener("database-synced", handleSynced);
+    };
   }, [userEmail]);
 
   const handleCreateFolder = (e: React.FormEvent) => {
@@ -754,6 +764,7 @@ export function Campaigns({ userEmail = "admin@example.com", userRole }: { userE
                       <th className="px-5 py-3">Campaign Name</th>
                       <th className="px-5 py-3">Country & Version</th>
                       <th className="px-5 py-3">Folder Path</th>
+                      <th className="px-5 py-3">QA Checkpoints Progress</th>
                       <th className="px-5 py-3">Created Date & Time</th>
                       <th className="px-5 py-3">Last Modified</th>
                       <th className="px-5 py-3">Status</th>
@@ -761,7 +772,9 @@ export function Campaigns({ userEmail = "admin@example.com", userRole }: { userE
                     </tr>
                   </thead>
                   <tbody className="text-xs divide-y divide-slate-100">
-                    {filteredCampaigns.map((campaign) => (
+                    {filteredCampaigns.map((campaign) => {
+                      const prog = getCampaignCheckpointProgress(campaign);
+                      return (
                       <tr 
                         key={campaign.id} 
                         draggable={!campaign.is_deleted}
@@ -800,6 +813,36 @@ export function Campaigns({ userEmail = "admin@example.com", userRole }: { userE
                             <Folder className="w-3 h-3 text-amber-500" />
                             <span>{getFolderName(campaign.folder_id)}</span>
                           </button>
+                        </td>
+                        <td className="px-5 py-3.5 text-slate-600">
+                          <div className="flex flex-col gap-1 w-36">
+                            <div className="flex items-center justify-between text-[11px] font-bold">
+                              <span className={prog.isFullyCompleted ? "text-emerald-700" : prog.completed > 0 ? "text-[#2b61d6]" : "text-slate-500"}>
+                                {prog.completed}/{prog.total} Done
+                              </span>
+                              <span className="text-slate-500 text-[10px]">{prog.percent}%</span>
+                            </div>
+                            <div className="w-full bg-slate-200 rounded-full h-2 overflow-hidden flex">
+                              <div 
+                                className={cn(
+                                  "h-full transition-all duration-500",
+                                  prog.isFullyCompleted ? "bg-emerald-500" : prog.completed > 0 ? "bg-[#2b61d6]" : "bg-slate-300"
+                                )} 
+                                style={{ width: `${prog.percent}%` }}
+                              />
+                            </div>
+                            <div className="flex items-center gap-1.5 text-[9px] text-slate-400">
+                              <span className="text-emerald-600 font-semibold">{prog.checked} Checked</span>
+                              <span>•</span>
+                              <span className="text-slate-500">{prog.na} N/A</span>
+                              {prog.pending > 0 && (
+                                <>
+                                  <span>•</span>
+                                  <span className="text-amber-600 font-semibold">{prog.pending} Left</span>
+                                </>
+                              )}
+                            </div>
+                          </div>
                         </td>
                         <td className="px-5 py-3.5 text-slate-500">
                           <div className="flex flex-col">
@@ -896,14 +939,17 @@ export function Campaigns({ userEmail = "admin@example.com", userRole }: { userE
                           )}
                         </td>
                       </tr>
-                    ))}
+                    );
+                  })}
                   </tbody>
                 </table>
               </div>
             ) : (
               /* Grid View */
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-                {filteredCampaigns.map((campaign) => (
+                {filteredCampaigns.map((campaign) => {
+                  const prog = getCampaignCheckpointProgress(campaign);
+                  return (
                   <div 
                     key={campaign.id} 
                     draggable={!campaign.is_deleted}
@@ -935,7 +981,30 @@ export function Campaigns({ userEmail = "admin@example.com", userRole }: { userE
                         </span>
                       </div>
 
-                      <div className="p-4 space-y-2 text-xs">
+                      <div className="p-4 space-y-2.5 text-xs">
+                        {/* Progress Bar in Grid View */}
+                        <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/80 space-y-1">
+                          <div className="flex items-center justify-between text-[11px] font-bold">
+                            <span className="text-slate-600">QA Checkpoints</span>
+                            <span className={prog.isFullyCompleted ? "text-emerald-700" : prog.completed > 0 ? "text-[#2b61d6]" : "text-slate-500"}>
+                              {prog.completed}/{prog.total} ({prog.percent}%)
+                            </span>
+                          </div>
+                          <div className="w-full bg-slate-200 rounded-full h-2 overflow-hidden flex">
+                            <div 
+                              className={cn(
+                                "h-full transition-all duration-500",
+                                prog.isFullyCompleted ? "bg-emerald-500" : prog.completed > 0 ? "bg-[#2b61d6]" : "bg-slate-300"
+                              )} 
+                              style={{ width: `${prog.percent}%` }}
+                            />
+                          </div>
+                          <div className="flex items-center justify-between text-[10px] text-slate-500 pt-0.5">
+                            <span>Checked: <strong className="text-emerald-700">{prog.checked}</strong></span>
+                            <span>N/A: <strong className="text-slate-700">{prog.na}</strong></span>
+                            <span>Left: <strong className="text-amber-700">{prog.pending}</strong></span>
+                          </div>
+                        </div>
                         <div className="flex items-center justify-between text-slate-600">
                           <span className="text-slate-400 flex items-center gap-1"><Folder className="w-3 h-3 text-amber-500" /> Folder:</span>
                           <button
@@ -1001,7 +1070,8 @@ export function Campaigns({ userEmail = "admin@example.com", userRole }: { userE
                       )}
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

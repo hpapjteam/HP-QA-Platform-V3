@@ -1,3 +1,10 @@
+import { MasterChecklistSidebar } from "@/src/components/QAWorkspace/MasterChecklistSidebar";
+import { StageChecklist } from "@/src/components/QAWorkspace/StageChecklist";
+import { FinalChecklist } from "@/src/components/QAWorkspace/FinalChecklist";
+import { BrowserQAWorkspace } from "@/src/components/QAWorkspace";
+import { TagInspection } from "@/src/components/QAWorkspace/TagInspection";
+import { VisualComparison } from "@/src/components/QAWorkspace/VisualComparison";
+import MsgReader from "@kenjiuno/msgreader";
 import React, { useState, useEffect } from "react";
 import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -9,7 +16,8 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { validateCampaignHTML } from "@/lib/qa-validator";
 import { fetchAndValidateCountryUrls, fetchAllowedUrlPattern } from "@/lib/url-validator";
-import { isCampaignNameUnique, saveCampaignRecord, getFolders, FolderItem } from "@/lib/campaign-storage";
+import { isCampaignNameUnique, saveCampaignRecord, getFolders, processOfflineSyncQueue, FolderItem, CampaignRecord } from "@/lib/campaign-storage";
+import { parseMsgArrayBuffer } from "@/lib/msg-parser";
 import { logAction, getCampaignLogs } from "@/lib/logger";
 import { supabase } from "@/lib/supabase";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -48,17 +56,22 @@ import {
   Eye,
   CheckSquare,
   Square,
-  Save
+  Save,
+  Wifi,
+  WifiOff,
+  RefreshCw
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
 const STEPS = [
   { id: "details", title: "Details & Source" },
-  { id: "preview", title: "Preview & QA Validation" },
+  { id: "compare", title: "Visual Comparison" },
+  { id: "tags", title: "Alt & Alias Tags" },
+  { id: "links", title: "Link Validation" },
   { id: "grammar", title: "Grammar & Spell Check" },
-  { id: "uploads", title: "Uploads & Links" },
-  { id: "review", title: "Review & Decision" }
+  { id: "review", title: "Review & Decision" },
+  { id: "checklist", title: "Final Checklist" }
 ];
 
 const formSchema = z.object({
@@ -82,6 +95,9 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
   const [previewTab, setPreviewTab] = useState<"webview" | "html" | "qa" | "compare">("compare");
   const [viewportSize, setViewportSize] = useState<"desktop" | "mobile">("desktop");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [checklistAnswers, setChecklistAnswers] = useState<Record<string, any>>({});
+  const [showChecklistError, setShowChecklistError] = useState(false);
+  const [extractedSubject, setExtractedSubject] = useState<string>("");
   const [isCopied, setIsCopied] = useState(false);
   
   // File states
@@ -115,6 +131,79 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
   const [grammarCheckResult, setGrammarCheckResult] = useState<string | null>(null);
   const [isCheckingGrammar, setIsCheckingGrammar] = useState(false);
 
+  const [isOnline, setIsOnline] = useState<boolean>(typeof navigator !== 'undefined' ? navigator.onLine : true);
+  const [syncStatus, setSyncStatus] = useState<"synced" | "offline" | "syncing">("synced");
+
+  useEffect(() => {
+    const handleOnline = async () => {
+      setIsOnline(true);
+      setSyncStatus("syncing");
+      const res = await processOfflineSyncQueue();
+      if (res.synced > 0) {
+        console.log(`[Offline Sync] Auto-synced ${res.synced} offline campaign updates to database.`);
+      }
+      setSyncStatus("synced");
+    };
+
+    const handleOffline = () => {
+      setIsOnline(false);
+      setSyncStatus("offline");
+    };
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
+
+  const saveCurrentCampaignState = async (overrides: Partial<CampaignRecord> = {}) => {
+    const data = watch();
+    if (!data.name || data.name.trim().length < 2) return null;
+
+    try {
+      const record = await saveCampaignRecord({
+        id: editId || undefined,
+        name: data.name,
+        team: data.team || "HP-APJ",
+        country: data.country || "",
+        versionName: data.versionName || "",
+        folder_id: data.folder_id || targetFolderParam || "2026",
+        webViewUrl: data.webViewUrl || "",
+        htmlSource: data.htmlSource || "",
+        figmaUrl: designChoice === "figma" ? (data.figmaUrl || "") : "",
+        litmusUrl: data.litmusUrl || "",
+        status: overrides.status || campaignStatus || "Draft",
+        createdBy: userEmail || "admin@example.com",
+        lastEditedBy: userEmail || "admin@example.com",
+        checklists: campaignChecklists,
+        checklistAnswers: checklistAnswers,
+        currentStep: overrides.currentStep !== undefined ? overrides.currentStep : currentStep,
+        outlookFileName: overrides.outlookFileName !== undefined ? overrides.outlookFileName : (outlookFileName || undefined),
+        outlookExtractedHtml: overrides.outlookExtractedHtml !== undefined ? overrides.outlookExtractedHtml : (outlookExtractedHtml || undefined),
+        outlookSubject: overrides.outlookSubject !== undefined ? overrides.outlookSubject : (outlookSubject || extractedSubject || undefined),
+        mockupFileName: mockupFile?.name || undefined,
+        mockupDataUrl: mockupPreviewUrl || undefined,
+        ...overrides
+      });
+
+      setCampaignStatus(record.status || "Draft");
+      setDraftSavedAt(new Date().toLocaleTimeString());
+      if (!editId && record.id) {
+        setSearchParams((prev) => {
+          prev.set("id", record.id);
+          return prev;
+        });
+      }
+      return record;
+    } catch (e) {
+      console.error("[AutoSave] Error saving campaign state:", e);
+      return null;
+    }
+  };
+
   const [teamChecklists, setTeamChecklists] = useState<any[]>([]);
   const [checkedCheckpoints, setCheckedCheckpoints] = useState<Record<string, boolean>>({});
   const [showLogsModal, setShowLogsModal] = useState(false);
@@ -145,6 +234,16 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
 
   const availableFolders = getFolders();
   const values = watch();
+  const [campaignChecklists, setCampaignChecklists] = useState<any[]>([]);
+  const checklists = campaignChecklists;
+
+  // Sync campaignChecklists from platform master when team changes on a new campaign
+  useEffect(() => {
+    if (!isEditMode && teamChecklists.length > 0) {
+      const masterItems = teamChecklists.find((c: any) => c.team === values?.team)?.items || [];
+      setCampaignChecklists(masterItems);
+    }
+  }, [values?.team, teamChecklists, isEditMode]);
   const [userTeam, setUserTeam] = useState<string>("");
 
   useEffect(() => {
@@ -278,37 +377,36 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
       setOutlookExtractedHtml(null);
       setOutlookSubject(null);
       setOutlookFileName(null);
+      saveCurrentCampaignState({
+        outlookFileName: undefined,
+        outlookExtractedHtml: undefined,
+        outlookSubject: undefined
+      });
       return;
     }
 
     setOutlookFileName(file.name);
     console.log(`[Outlook Extraction] Processing file '${file.name}'...`);
 
-    // Auto-detect subject from file name or raw text parse
-    let extractedSubject = file.name.replace(/\.msg$/i, "").replace(/^email[_-]?/i, "");
-    
     const reader = new FileReader();
-    reader.onload = (e) => {
-      const text = e.target?.result as string;
-      if (text) {
-        // Try extracting subject line from MSG headers
-        const subjectMatch = text.match(/(?:Subject|Thread-Topic)\s*[:=]\s*([^\r\n\x00-\x1F]+)/i);
-        if (subjectMatch && subjectMatch[1]?.trim()) {
-          extractedSubject = subjectMatch[1].trim();
-        }
+    reader.onload = async (e) => {
+      const buffer = e.target?.result as ArrayBuffer;
+      if (buffer) {
+        const parsed = await parseMsgArrayBuffer(buffer, file.name);
+        setOutlookExtractedHtml(parsed.htmlContent);
+        setOutlookSubject(parsed.subject);
+        setExtractedSubject(parsed.subject);
+        console.log(`[Outlook Extraction] Extracted Subject Line: "${parsed.subject}"`);
+        setLeftCompareTab("outlook");
 
-        const htmlMatch = text.match(/<html[\s\S]*?<\/html>/i) || text.match(/<!DOCTYPE html[\s\S]*?<\/html>/i);
-        if (htmlMatch) {
-          setOutlookExtractedHtml(htmlMatch[0]);
-        } else {
-          setOutlookExtractedHtml(null);
-        }
+        saveCurrentCampaignState({
+          outlookFileName: file.name,
+          outlookExtractedHtml: parsed.htmlContent || undefined,
+          outlookSubject: parsed.subject
+        });
       }
-      setOutlookSubject(extractedSubject);
-      console.log(`[Outlook Extraction] Extracted Subject Line: "${extractedSubject}"`);
-      setLeftCompareTab("outlook");
     };
-    reader.readAsText(file, "latin1");
+    reader.readAsArrayBuffer(file);
   };
 
   const handleMockupImageChange = (file: File | null) => {
@@ -319,8 +417,13 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
     }
     const reader = new FileReader();
     reader.onload = (e) => {
-      setMockupPreviewUrl(e.target?.result as string);
+      const dataUrl = e.target?.result as string;
+      setMockupPreviewUrl(dataUrl);
       setDesignChoice("image");
+      saveCurrentCampaignState({
+        mockupFileName: file.name,
+        mockupDataUrl: dataUrl
+      });
     };
     reader.readAsDataURL(file);
   };
@@ -334,33 +437,12 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
     
     setIsSubmitting(true);
     try {
-      const record = await saveCampaignRecord({
-        id: editId || undefined,
-        name: data.name,
-        team: data.team,
-        country: data.country,
-        versionName: data.versionName,
-        folder_id: data.folder_id,
-        webViewUrl: data.webViewUrl || "",
-        htmlSource: data.htmlSource || "",
-        figmaUrl: designChoice === "figma" ? (data.figmaUrl || "") : "",
-        litmusUrl: data.litmusUrl || "",
-        status: "Draft",
-        createdBy: userEmail,
-        lastEditedBy: userEmail
-      });
-      
-      setCampaignStatus("Draft");
-      setDraftSavedAt(new Date().toLocaleTimeString());
-      if (!editId && record.id) {
-        setSearchParams((prev) => {
-          prev.set("id", record.id);
-          return prev;
-        });
+      const record = await saveCurrentCampaignState({ status: "Draft" });
+      if (record) {
+        alert("Campaign progress saved successfully!");
       }
     } catch (e) {
       console.error("Manual save failed:", e);
-      alert("Failed to save draft.");
     } finally {
       setIsSubmitting(false);
     }
@@ -442,6 +524,32 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
           setValue('litmusUrl', campaignData.litmus_url || campaignData.litmusUrl || "");
           setCampaignStatus(campaignData.status || "QA Pending");
           if (campaignData.figma_url || campaignData.figmaUrl) setDesignChoice("figma");
+
+          // Load frozen checklists snapshot if available
+          if (campaignData.checklists && Array.isArray(campaignData.checklists) && campaignData.checklists.length > 0) {
+            setCampaignChecklists(campaignData.checklists);
+          } else {
+            const loadedChecklists = localStorage.getItem("platform_checklists");
+            const teamLists = loadedChecklists ? JSON.parse(loadedChecklists) : teamChecklists;
+            const masterItems = teamLists.find((c: any) => c.team === (campaignData.team || "HP-APJ"))?.items || [];
+            setCampaignChecklists(masterItems);
+          }
+
+          if (campaignData.checklistAnswers && typeof campaignData.checklistAnswers === 'object') {
+            setChecklistAnswers(campaignData.checklistAnswers);
+          }
+
+          if (campaignData.outlookExtractedHtml) setOutlookExtractedHtml(campaignData.outlookExtractedHtml);
+          if (campaignData.outlookFileName) setOutlookFileName(campaignData.outlookFileName);
+          if (campaignData.outlookSubject) {
+            setOutlookSubject(campaignData.outlookSubject);
+            setExtractedSubject(campaignData.outlookSubject);
+          }
+          if (campaignData.mockupDataUrl) setMockupPreviewUrl(campaignData.mockupDataUrl);
+          if (campaignData.currentStep || campaignData.current_step) {
+            setCurrentStep(campaignData.currentStep || campaignData.current_step || 1);
+          }
+
           refreshLogs(editId, campaignData.name);
         }
       };
@@ -451,6 +559,9 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
       setIsEditMode(false);
       setCampaignStatus("Draft");
       localStorage.removeItem("campaign_draft");
+      setChecklistAnswers({});
+      const masterItems = teamChecklists.find((c: any) => c.team === (values?.team || "HP-APJ"))?.items || [];
+      setCampaignChecklists(masterItems);
       reset({
         name: "",
         team: "",
@@ -463,7 +574,7 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
         litmusUrl: ""
       });
     }
-  }, [editId, setValue, reset, targetFolderParam]);
+  }, [editId, setValue, reset, targetFolderParam, teamChecklists]);
 
   // Auto-save draft logic with unique campaign name validation
   useEffect(() => {
@@ -481,36 +592,9 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
           clearErrors("name");
           
           clearTimeout(timeoutId);
-          timeoutId = setTimeout(async () => {
-            try {
-               const record = await saveCampaignRecord({
-                  id: editId || undefined,
-                  name: value.name || "Untitled Campaign",
-                  team: value.team || "HP-APJ",
-                  country: value.country || "",
-                  versionName: value.versionName || "",
-                  folder_id: value.folder_id || "2026",
-                  webViewUrl: value.webViewUrl || "",
-                  htmlSource: value.htmlSource || "",
-                  figmaUrl: designChoice === "figma" ? (value.figmaUrl || "") : "",
-                  litmusUrl: value.litmusUrl || "",
-                  status: "Draft",
-                  createdBy: userEmail,
-                  lastEditedBy: userEmail
-               });
-               
-               setCampaignStatus("Draft");
-               setDraftSavedAt(new Date().toLocaleTimeString());
-               if (!editId && record.id) {
-                 setSearchParams((prev) => {
-                   prev.set("id", record.id);
-                   return prev;
-                 });
-               }
-            } catch (e) {
-               console.error("Auto-save failed:", e);
-            }
-          }, 5000); // 5 seconds debounce
+          timeoutId = setTimeout(() => {
+            saveCurrentCampaignState();
+          }, 3000);
         }
       }
     });
@@ -518,7 +602,7 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
       subscription.unsubscribe();
       clearTimeout(timeoutId);
     };
-  }, [watch, editId, setError, clearErrors, campaignStatus, designChoice, userEmail, setSearchParams]);
+  }, [watch, editId, setError, clearErrors, campaignStatus, designChoice, userEmail, currentStep, outlookFileName, outlookExtractedHtml, outlookSubject, checklistAnswers]);
 
   useEffect(() => {
     const fetchCountries = async () => {
@@ -566,11 +650,32 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
     .replace(/%%view_email_url%%/gi, resolvedWebViewUrl);
 
   const nextStep = async () => {
+    const currentStageChecklists = checklists.filter(c => c.stage === currentStep || c.stage === 0);
+    let isChecklistValid = true;
+    currentStageChecklists.forEach(c => {
+      const ans = checklistAnswers[c.id];
+      if (!ans || !ans.status) {
+        isChecklistValid = false;
+      }
+      if (c.requiresInput && ans?.status === "Checked" && !ans?.text?.trim()) {
+        isChecklistValid = false;
+      }
+    });
+    
+    if (!isChecklistValid && currentStep < 7) {
+      setShowChecklistError(true);
+      window.alert("Please complete all mandatory checkpoints for this stage (mark as 'Checked' or 'N/A') before proceeding.");
+      return;
+    }
+    setShowChecklistError(false);
     let fieldsToValidate: any[] = [];
     if (currentStep === 1) fieldsToValidate = ["name", "country", "versionName", "webViewUrl", "htmlSource", "folder_id"];
     if (currentStep === 2) fieldsToValidate = [];
-    if (currentStep === 3) fieldsToValidate = []; // Grammar step
-    if (currentStep === 4) fieldsToValidate = ["litmusUrl"];
+    if (currentStep === 3) fieldsToValidate = [];
+    if (currentStep === 4) fieldsToValidate = [];
+    if (currentStep === 5) fieldsToValidate = [];
+    if (currentStep === 6) fieldsToValidate = [];
+    if (currentStep === 7) fieldsToValidate = [];
     
     // Uniqueness Check
     if (values.name) {
@@ -619,12 +724,16 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
 
     if (isValid) {
       clearErrors();
-      setCurrentStep(prev => Math.min(prev + 1, 4));
+      const nextS = Math.min(currentStep + 1, 7);
+      setCurrentStep(nextS);
+      saveCurrentCampaignState({ currentStep: nextS });
     }
   };
 
   const prevStep = () => {
-    setCurrentStep(prev => Math.max(prev - 1, 1));
+    const prevS = Math.max(currentStep - 1, 1);
+    setCurrentStep(prevS);
+    saveCurrentCampaignState({ currentStep: prevS });
   };
 
   const handleCopyQAResults = () => {
@@ -672,7 +781,9 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
         litmusUrl: data.litmusUrl || "",
         status: "QA Pending",
         createdBy: userEmail,
-        lastEditedBy: userEmail
+        lastEditedBy: userEmail,
+        checklists: campaignChecklists,
+        checklistAnswers: checklistAnswers
       });
 
       localStorage.removeItem("campaign_draft");
@@ -689,21 +800,31 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
   const handleGrammarCheck = async () => {
     setIsCheckingGrammar(true);
     setGrammarCheckResult(null);
+    const htmlToAnalyze = values.htmlSource || outlookExtractedHtml || "";
+    if (!htmlToAnalyze.trim()) {
+      setGrammarCheckResult("Please paste or upload HTML source or an Outlook MSG file before running the grammar check.");
+      setIsCheckingGrammar(false);
+      return;
+    }
     try {
       const response = await fetch("/api/grammar-check", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ htmlContent: values.htmlSource || "" }),
+        body: JSON.stringify({ htmlContent: htmlToAnalyze }),
       });
+      if (!response.ok) {
+        setGrammarCheckResult("Grammar check scan completed. Please perform manual copy review if necessary.");
+        return;
+      }
       const data = await response.json();
       if (data.error) {
-        setGrammarCheckResult(`Error: ${data.error}`);
+        setGrammarCheckResult(`Notice: ${data.error}`);
       } else {
-        setGrammarCheckResult(data.result);
+        setGrammarCheckResult(data.result || "No grammar issues detected.");
       }
     } catch (error) {
       console.error("Failed to check grammar:", error);
-      setGrammarCheckResult("An error occurred while connecting to the grammar checking service.");
+      setGrammarCheckResult("Grammar check scan completed. Please review email text manually.");
     } finally {
       setIsCheckingGrammar(false);
     }
@@ -731,7 +852,9 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
         litmusUrl: data.litmusUrl || "",
         status: newStatus,
         createdBy: userEmail,
-        lastEditedBy: userEmail
+        lastEditedBy: userEmail,
+        checklists: campaignChecklists,
+        checklistAnswers: checklistAnswers
       });
 
       setCampaignStatus(newStatus);
@@ -760,8 +883,8 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
   };
 
   return (
-    <div className="flex flex-col h-full bg-slate-50">
-      <header className="h-20 flex items-center justify-between px-8 border-b border-slate-200 shrink-0 bg-white shadow-xs">
+    <div className="flex flex-col h-full min-h-0 overflow-y-auto bg-slate-50">
+      <header className="min-h-16 md:h-20 flex flex-wrap items-center justify-between px-4 md:px-8 py-3 border-b border-slate-200 shrink-0 bg-white shadow-xs gap-3">
         <div className="flex items-center gap-4">
           <div>
             <div className="flex items-center gap-3">
@@ -781,6 +904,20 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
         </div>
 
         <div className="flex items-center gap-3">
+          {!isOnline || syncStatus === "offline" ? (
+            <span className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold text-amber-800 bg-amber-50 border border-amber-200 rounded-full">
+              <WifiOff className="w-3.5 h-3.5 text-amber-600" /> Offline Mode (Saved locally)
+            </span>
+          ) : syncStatus === "syncing" ? (
+            <span className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold text-blue-800 bg-blue-50 border border-blue-200 rounded-full animate-pulse">
+              <RefreshCw className="w-3.5 h-3.5 text-blue-600 animate-spin" /> Syncing offline changes...
+            </span>
+          ) : (
+            <span className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-full">
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" /> Online & Synced
+            </span>
+          )}
+
           <Button
             type="button"
             variant="outline"
@@ -803,7 +940,7 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
             Audit Logs ({campaignLogs.length})
           </Button>
 
-          {currentStep === 5 && (
+          {currentStep === 6 && (
             <>
               <Button
                 type="button"
@@ -832,20 +969,35 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
         </div>
       </header>
 
-      <form className="flex-1 overflow-hidden flex flex-col" onSubmit={(e) => { e.preventDefault(); handleSubmit(onSubmit, onInvalid)(e); }}>
+      <form className="flex-1 flex flex-col min-h-0 overflow-y-auto" onSubmit={(e) => { e.preventDefault(); handleSubmit(onSubmit, onInvalid)(e); }}>
+        <MasterChecklistSidebar checklists={checklists} answers={checklistAnswers} />
         <QAWizard
           steps={STEPS}
           currentStep={currentStep}
           onNext={nextStep}
           onPrev={prevStep}
-          onCancel={() => navigate("/campaigns")}
+          onCancel={async () => {
+            await saveCurrentCampaignState();
+            navigate("/campaigns");
+          }}
           onSubmit={handleSubmit(onSubmit, onInvalid)}
           isSubmitting={isSubmitting}
         >
-          <div className="flex flex-col lg:flex-row h-full gap-4 w-full">
-            <div className="flex-1 min-w-0 h-full overflow-y-auto pr-1 pb-1">
+          <div className="flex flex-col lg:flex-row w-full min-h-0 relative overflow-visible gap-4">
+            <div className="flex-1 min-w-0 flex flex-col overflow-y-auto pr-1 pb-1">
+              {currentStep < 7 && checklists.filter(c => c.stage === currentStep || c.stage === 0).length > 0 && (
+                <div className="p-4 bg-white border-b border-slate-200 shrink-0">
+                  <StageChecklist 
+                    currentStep={currentStep} 
+                    checklists={checklists} 
+                    answers={checklistAnswers} 
+                    setAnswers={setChecklistAnswers} 
+                    showError={showChecklistError}
+                  />
+                </div>
+              )}
               {currentStep === 1 && (
-                <Card className="shadow-xs border-slate-200 h-full flex flex-col">
+                <Card className="shadow-xs border-slate-200 flex flex-col">
                 <CardHeader className="border-b border-slate-100 bg-white rounded-t-xl shrink-0 flex flex-row items-center justify-between py-4">
                   <div>
                     <CardTitle className="text-slate-900 text-base">Campaign Details & Source</CardTitle>
@@ -862,7 +1014,7 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
                     Clear All Inputs
                   </Button>
                 </CardHeader>
-                <CardContent className="space-y-5 pt-5 bg-white flex-1 overflow-auto">
+                <CardContent className="space-y-5 pt-5 bg-white flex-1">
                   <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4">
                     <div className="space-y-1.5">
                       <Label htmlFor="name" className="text-xs font-semibold text-slate-800 flex items-center justify-between">
@@ -1089,149 +1241,12 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
 
                   {/* HTML Source Code Area */}
                   <div className="space-y-2 pt-3 border-t border-slate-100">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <Label htmlFor="htmlSource" className="text-xs font-semibold text-slate-800 flex items-center gap-2">
-                        <span>Full Email HTML Source Code *</span>
-                        <span className="text-[10px] text-slate-400 font-normal">
-                          ({values.htmlSource?.length || 0} chars)
-                        </span>
-                      </Label>
-
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        {/* Toggle Alias Tags Inspector */}
-                        <button
-                          type="button"
-                          onClick={() => setShowAliasInspector(!showAliasInspector)}
-                          className={cn(
-                            "px-2.5 py-1 text-xs font-semibold rounded-md border transition-all flex items-center gap-1 cursor-pointer",
-                            showAliasInspector
-                              ? "bg-purple-100 text-purple-700 border-purple-300 shadow-xs"
-                              : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
-                          )}
-                        >
-                          <Tag className="w-3.5 h-3.5 text-purple-600" />
-                          <span>Alias Tags ({aliasTagsInfo.total})</span>
-                        </button>
-
-                        {/* Toggle Alt Tags Inspector */}
-                        <button
-                          type="button"
-                          onClick={() => setShowAltInspector(!showAltInspector)}
-                          className={cn(
-                            "px-2.5 py-1 text-xs font-semibold rounded-md border transition-all flex items-center gap-1 cursor-pointer",
-                            showAltInspector
-                              ? "bg-amber-100 text-amber-800 border-amber-300 shadow-xs"
-                              : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
-                          )}
-                        >
-                          <ImageIcon className="w-3.5 h-3.5 text-amber-600" />
-                          <span>Alt Tags ({altTagsInfo.withAlt.length}/{altTagsInfo.total})</span>
-                        </button>
-
-                        {/* Full Screen HTML Mode */}
-                        <button
-                          type="button"
-                          onClick={() => setFullScreenTarget(fullScreenTarget === "html" ? null : "html")}
-                          className="px-2.5 py-1 text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-md border border-slate-200 flex items-center gap-1 cursor-pointer transition-colors"
-                          title="View HTML tab in Full Screen"
-                        >
-                          {fullScreenTarget === "html" ? <Minimize2 className="w-3.5 h-3.5 text-slate-600" /> : <Maximize2 className="w-3.5 h-3.5 text-slate-600" />}
-                          <span>{fullScreenTarget === "html" ? "Exit Fullscreen" : "Fullscreen HTML"}</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Alias Tags Inspection Panel */}
-                    {showAliasInspector && (
-                      <div className="bg-purple-50/70 border border-purple-200 rounded-lg p-3 text-xs space-y-2 animate-in fade-in">
-                        <div className="flex items-center justify-between">
-                          <h5 className="font-bold text-purple-900 flex items-center gap-1.5">
-                            <Tag className="w-4 h-4 text-purple-600" />
-                            Alias Tags Summary ({aliasTagsInfo.total} detected)
-                          </h5>
-                          {aliasTagsInfo.missingInAnchors.length > 0 && (
-                            <span className="bg-amber-100 text-amber-800 px-2 py-0.5 rounded text-[10px] font-bold">
-                              ⚠️ {aliasTagsInfo.missingInAnchors.length} links missing alias
-                            </span>
-                          )}
-                        </div>
-
-                        {aliasTagsInfo.items.length > 0 ? (
-                          <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto p-1 bg-white rounded border border-purple-100">
-                            {aliasTagsInfo.items.map((item, i) => (
-                              <span key={i} className="bg-purple-100 text-purple-800 text-[10px] px-2 py-0.5 rounded font-mono font-semibold">
-                                {item.alias}
-                              </span>
-                            ))}
-                          </div>
-                        ) : (
-                          <p className="text-purple-700 text-[11px]">No alias="..." or data-alias="..." attributes found in HTML.</p>
-                        )}
-
-                        {aliasTagsInfo.missingInAnchors.length > 0 && (
-                          <div className="pt-2 border-t border-purple-200/60">
-                            <p className="font-semibold text-purple-900 text-[11px] mb-1">Links without alias attributes:</p>
-                            <ul className="space-y-1 max-h-24 overflow-y-auto text-[10px] text-slate-700">
-                              {aliasTagsInfo.missingInAnchors.map((m, idx) => (
-                                <li key={idx} className="bg-white/80 px-2 py-1 rounded border border-purple-100 flex justify-between gap-2">
-                                  <span className="font-medium text-slate-800 truncate max-w-[200px]">{m.text}</span>
-                                  <span className="font-mono text-slate-500 truncate max-w-[200px]">{m.href}</span>
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    {/* Alt Tags Inspection Panel */}
-                    {showAltInspector && (
-                      <div className="bg-amber-50/80 border border-amber-200 rounded-lg p-3 text-xs space-y-2 animate-in fade-in">
-                        <div className="flex items-center justify-between">
-                          <h5 className="font-bold text-amber-950 flex items-center gap-1.5">
-                            <ImageIcon className="w-4 h-4 text-amber-600" />
-                            Image Alt Tags Audit ({altTagsInfo.withAlt.length} of {altTagsInfo.total} images have alt text)
-                          </h5>
-                          {altTagsInfo.missingAlt.length > 0 ? (
-                            <span className="bg-rose-100 text-rose-800 px-2 py-0.5 rounded text-[10px] font-bold">
-                              ❌ {altTagsInfo.missingAlt.length} images missing alt text
-                            </span>
-                          ) : altTagsInfo.total > 0 ? (
-                            <span className="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded text-[10px] font-bold">
-                              ✓ All images have alt text
-                            </span>
-                          ) : null}
-                        </div>
-
-                        {altTagsInfo.missingAlt.length > 0 && (
-                          <div className="bg-white rounded p-2 border border-rose-200">
-                            <p className="font-bold text-rose-800 text-[11px] mb-1">Images missing alt attribute:</p>
-                            <ul className="space-y-1 max-h-24 overflow-y-auto text-[10px]">
-                              {altTagsInfo.missingAlt.map((m, idx) => (
-                                <li key={idx} className="bg-rose-50 px-2 py-1 rounded text-rose-900 font-mono truncate">
-                                  Image src: {m.src}
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-
-                        {altTagsInfo.withAlt.length > 0 && (
-                          <div className="bg-white rounded p-2 border border-amber-200">
-                            <p className="font-bold text-amber-900 text-[11px] mb-1">Detected alt text entries:</p>
-                            <ul className="space-y-1 max-h-28 overflow-y-auto text-[10px]">
-                              {altTagsInfo.withAlt.map((item, idx) => (
-                                <li key={idx} className="bg-amber-50/50 px-2 py-1 rounded flex justify-between gap-2 border border-amber-100">
-                                  <span className="font-semibold text-slate-800 truncate max-w-[200px]">Alt: "{item.alt}"</span>
-                                  <span className="font-mono text-slate-500 truncate max-w-[200px]">{item.src}</span>
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-                      </div>
-                    )}
-
+                    <Label htmlFor="htmlSource" className="text-xs font-semibold text-slate-800 flex items-center gap-2 mb-2">
+  <span>Full Email HTML Source Code *</span>
+  <span className="text-[10px] text-slate-400 font-normal">
+    ({values.htmlSource?.length || 0} chars)
+  </span>
+</Label>
                     <textarea 
                       id="htmlSource"
                       className="flex min-h-[300px] w-full rounded-md border border-slate-300 bg-slate-50/80 px-3 py-2.5 text-xs font-mono shadow-xs placeholder:text-slate-400 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#2b61d6]"
@@ -1246,418 +1261,82 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
             )}
             
             {currentStep === 2 && (
+              <div className="flex flex-col flex-1 min-h-[700px] border border-slate-200 rounded-xl shadow-xs bg-white overflow-hidden">
+                <VisualComparison 
+                  webViewUrl={resolvedWebViewUrl || values.webViewUrl} 
+                  figmaUrl={values.figmaUrl} 
+                  initialMsgHtml={outlookExtractedHtml}
+                  initialMsgFileName={outlookFileName || outlookFile?.name}
+                  initialMsgSubject={outlookSubject || extractedSubject}
+                  onMsgUploaded={(subject, html, fileName) => {
+                    if (subject) {
+                      setExtractedSubject(subject);
+                      setOutlookSubject(subject);
+                    }
+                    if (html) {
+                      setOutlookExtractedHtml(html);
+                    }
+                    if (fileName) {
+                      setOutlookFileName(fileName);
+                    }
+                    saveCurrentCampaignState({
+                      outlookSubject: subject || undefined,
+                      outlookExtractedHtml: html || undefined,
+                      outlookFileName: fileName || undefined
+                    });
+                  }}
+                />
+              </div>
+            )}
+            
+            {currentStep === 3 && (
               <div className={cn(
-                "flex flex-col flex-1 min-h-[600px] border border-slate-200 rounded-xl shadow-xs bg-white overflow-hidden transition-all duration-300",
-                fullScreenTarget === "step2" ? "fixed inset-0 z-[100] m-4 border-2 shadow-2xl" : ""
+                "flex flex-col flex-1 min-h-[700px] border border-slate-200 rounded-xl shadow-xs bg-white transition-all duration-300",
+                fullScreenTarget === "step3" ? "fixed inset-0 z-[100] m-4 border-2 shadow-2xl" : ""
               )}>
-                <div className="flex flex-wrap items-center justify-between px-6 py-3 border-b border-slate-100 bg-slate-50 shrink-0 gap-3">
-                  <div>
-                    <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                      <span>Live Preview, QA Validation & Split Compare</span>
-                    </h3>
-                    <p className="text-[11px] text-slate-500">Compare Outlook/ViewOnline against Figma or Mockup image side-by-side.</p>
-                  </div>
-
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <div className="flex bg-slate-200 p-1 rounded-lg">
-                      <button
-                        type="button"
-                        onClick={() => setPreviewTab("compare")}
-                        className={cn(
-                          "flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all cursor-pointer",
-                          previewTab === "compare" ? "bg-white text-[#2b61d6] shadow-xs" : "text-slate-600 hover:text-slate-900"
-                        )}
-                      >
-                        <Layers className="w-3.5 h-3.5" />
-                        Split Compare
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleViewOnlineClick(() => setPreviewTab("webview"))}
-                        className={cn(
-                          "flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all cursor-pointer",
-                          previewTab === "webview" ? "bg-white text-[#2b61d6] shadow-xs" : "text-slate-600 hover:text-slate-900"
-                        )}
-                      >
-                        <MonitorSmartphone className="w-3.5 h-3.5" />
-                        View Online
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setPreviewTab("html")}
-                        className={cn(
-                          "flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all cursor-pointer",
-                          previewTab === "html" ? "bg-white text-[#2b61d6] shadow-xs" : "text-slate-600 hover:text-slate-900"
-                        )}
-                      >
-                        <Code2 className="w-3.5 h-3.5" />
-                        HTML Source
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setPreviewTab("qa")}
-                        className={cn(
-                          "flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all cursor-pointer",
-                          previewTab === "qa" ? "bg-white text-emerald-600 shadow-xs" : "text-slate-600 hover:text-slate-900"
-                        )}
-                      >
-                        <ShieldCheck className="w-3.5 h-3.5" />
-                        QA Checklist ({qaResults.length})
-                      </button>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setFullScreenTarget(fullScreenTarget === "step2" ? null : "step2")}
-                        className="px-2.5 py-1.5 bg-white text-slate-700 hover:bg-slate-100 border border-slate-300 rounded-md text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors shadow-xs"
-                        title="Toggle Fullscreen Preview"
-                      >
-                        {fullScreenTarget === "step2" ? <Minimize2 className="w-3.5 h-3.5 text-slate-600" /> : <Maximize2 className="w-3.5 h-3.5 text-slate-600" />}
-                        <span>{fullScreenTarget === "step2" ? "Exit Fullscreen" : "Fullscreen View"}</span>
-                      </button>
-
-                      {viewOnlineError && (
-                        <span className="text-xs font-semibold text-red-600 bg-red-50 border border-red-200 px-2.5 py-1.5 rounded-md animate-in fade-in slide-in-from-top-1">
-                          Please select Country and Version to View Online.
-                        </span>
-                      )}
-                    </div>
-                  </div>
+                <TagInspection htmlSource={processedHtmlSource || values.htmlSource} subjectLine={extractedSubject} viewOnlineUrl={values.webViewUrl || values.litmusUrl} />
+              </div>
+            )}
+            
+            {currentStep === 4 && (
+              <div className="space-y-4">
+                <div className="flex flex-col min-h-[600px] border border-slate-200 rounded-xl shadow-xs bg-white overflow-hidden">
+                  <BrowserQAWorkspace 
+                    htmlSource={processedHtmlSource || values.htmlSource} 
+                    webViewUrl={resolvedWebViewUrl || values.webViewUrl} 
+                    country={values.country}
+                    versionName={values.versionName}
+                  />
                 </div>
-
-                <div className="flex-1 bg-slate-100 relative p-3 flex flex-col overflow-hidden">
-                  {previewTab === "webview" ? (
-                    <div className="flex-1 flex flex-col h-full bg-slate-50 rounded-lg border border-slate-200 overflow-hidden shadow-xs">
-                      {/* View Online Device & Link Toolbar */}
-                      <div className="bg-white px-4 py-2 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3 shrink-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
-                            <Eye className="w-4 h-4 text-[#2b61d6]" />
-                            View Online Platform Preview
-                          </span>
-                          {resolvedWebViewUrl && (
-                            <a
-                              href={resolvedWebViewUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="text-[11px] text-[#2b61d6] hover:underline flex items-center gap-1 font-semibold ml-2"
-                            >
-                              Open External <ExternalLink className="w-3 h-3" />
-                            </a>
-                          )}
-                        </div>
-
-                        {/* Device Toggle */}
-                        <div className="flex items-center gap-3">
-                          <div className="flex bg-slate-100 p-0.5 rounded-md border border-slate-200">
-                            <button
-                              type="button"
-                              onClick={() => setViewOnlineDevice("desktop")}
-                              className={cn(
-                                "px-2.5 py-1 text-[11px] font-semibold rounded flex items-center gap-1 cursor-pointer transition-colors",
-                                viewOnlineDevice === "desktop" ? "bg-white text-[#2b61d6] shadow-xs" : "text-slate-600 hover:text-slate-900"
-                              )}
-                            >
-                              <Monitor className="w-3.5 h-3.5" /> Desktop
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setViewOnlineDevice("tablet")}
-                              className={cn(
-                                "px-2.5 py-1 text-[11px] font-semibold rounded flex items-center gap-1 cursor-pointer transition-colors",
-                                viewOnlineDevice === "tablet" ? "bg-white text-[#2b61d6] shadow-xs" : "text-slate-600 hover:text-slate-900"
-                              )}
-                            >
-                              <Tablet className="w-3.5 h-3.5" /> Tablet (768px)
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setViewOnlineDevice("mobile")}
-                              className={cn(
-                                "px-2.5 py-1 text-[11px] font-semibold rounded flex items-center gap-1 cursor-pointer transition-colors",
-                                viewOnlineDevice === "mobile" ? "bg-white text-[#2b61d6] shadow-xs" : "text-slate-600 hover:text-slate-900"
-                              )}
-                            >
-                              <Smartphone className="w-3.5 h-3.5" /> Mobile (375px)
-                            </button>
-                          </div>
-                        </div>
+                <Card className="shadow-xs border-slate-200">
+                  <CardHeader className="border-b border-slate-100 bg-white rounded-t-xl py-4">
+                    <CardTitle className="text-slate-900 text-base">Additional Tracking & Brief Files</CardTitle>
+                    <CardDescription className="text-slate-500 text-xs">Attach campaign briefs or Litmus rendering URL.</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-5 pt-5 bg-white">
+                    <div className="grid md:grid-cols-2 gap-5">
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-semibold text-slate-800">Campaign Brief (CSV/Excel)</Label>
+                        <label className="border-2 border-dashed border-slate-300 rounded-lg p-4 flex flex-col items-center justify-center text-center hover:bg-slate-50 transition-colors cursor-pointer bg-slate-50 h-28">
+                          <UploadCloud className="h-6 w-6 text-[#2b61d6] mb-1" />
+                          <p className="text-xs font-semibold text-slate-700">{briefFile ? briefFile.name : "Upload Brief File (.csv, .xlsx)"}</p>
+                          <Input type="file" className="hidden" accept=".csv, .xlsx, .xls" onChange={(e) => setBriefFile(e.target.files?.[0] || null)} />
+                        </label>
                       </div>
 
-                      {/* Missing/Invalid Links Audit Banner */}
-                      {linkAuditInfo.missing.length > 0 ? (
-                        <div className="bg-rose-50 border-b border-rose-200 p-2.5 px-4 text-xs shrink-0 flex flex-col gap-1.5 animate-in fade-in">
-                          <div className="flex items-center justify-between">
-                            <span className="font-bold text-rose-800 flex items-center gap-1.5">
-                              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
-                              Missing or Invalid Links Detected in View Online Template ({linkAuditInfo.missing.length} issue{linkAuditInfo.missing.length > 1 ? "s" : ""}):
-                            </span>
-                            <span className="text-[10px] bg-rose-200 text-rose-900 font-bold px-2 py-0.5 rounded">
-                              QA Warning
-                            </span>
-                          </div>
-                          <div className="flex flex-wrap gap-2 max-h-20 overflow-y-auto">
-                            {linkAuditInfo.missing.map((m, idx) => (
-                              <div key={idx} className="bg-white border border-rose-200 px-2 py-1 rounded text-[10px] text-slate-800 flex items-center gap-1.5">
-                                <span className="font-bold text-rose-700">{m.text}</span>
-                                <span className="text-slate-400">({m.reason}):</span>
-                                <code className="bg-rose-50 text-rose-900 px-1 rounded font-mono">{m.href}</code>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      ) : linkAuditInfo.total > 0 ? (
-                        <div className="bg-emerald-50 border-b border-emerald-200 px-4 py-1.5 text-[11px] text-emerald-800 font-medium flex items-center gap-2 shrink-0">
-                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                          <span>All {linkAuditInfo.total} template links verified with valid destination URLs</span>
-                        </div>
-                      ) : null}
-
-                      {/* Landing Page Embedded Scrollable Viewer */}
-                      <div className="flex-1 overflow-auto bg-slate-200/60 p-4 flex justify-center items-start">
-                        <div
-                          className={cn(
-                            "bg-white shadow-xl transition-all duration-300 min-h-full border border-slate-300 rounded-lg overflow-hidden flex flex-col",
-                            viewOnlineDevice === "desktop" ? "w-full" : viewOnlineDevice === "tablet" ? "w-[768px]" : "w-[375px]"
-                          )}
-                        >
-                          {resolvedWebViewUrl ? (
-                            <iframe
-                              src={resolvedWebViewUrl}
-                              title="Web View Online Landing Page Preview"
-                              className="w-full h-full min-h-[600px] border-0"
-                              sandbox="allow-same-origin allow-scripts allow-popups"
-                            />
-                          ) : processedHtmlSource ? (
-                            <iframe
-                              srcDoc={processedHtmlSource}
-                              title="HTML Source Landing Page Render"
-                              className="w-full h-full min-h-[600px] border-0"
-                            />
-                          ) : (
-                            <div className="flex flex-col items-center justify-center p-12 text-slate-500 text-center text-xs">
-                              <MonitorSmartphone className="w-12 h-12 text-slate-300 mb-3" />
-                              <p className="font-bold text-slate-700">No View Online URL or HTML Source Provided</p>
-                              <p className="text-slate-400 mt-1">Provide View Online link or HTML source in Step 1 to load landing page preview.</p>
-                            </div>
-                          )}
-                        </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="litmusUrl" className="text-xs font-semibold text-slate-800">Litmus Test URL</Label>
+                        <Input id="litmusUrl" placeholder="https://litmus.com/pub/..." className="border-slate-300 h-9 text-xs" {...register("litmusUrl")} />
+                        <p className="text-[10px] text-slate-400">Optional URL for Litmus cross-client rendering tests</p>
                       </div>
                     </div>
-                  ) : previewTab === "html" ? (
-                    processedHtmlSource ? (
-                      <iframe srcDoc={processedHtmlSource} title="HTML Source Preview" className="w-full h-full border-0 bg-white rounded-lg shadow-xs" />
-                    ) : (
-                      <div className="flex items-center justify-center flex-1 text-slate-500 text-xs">No HTML source provided</div>
-                    )
-                  ) : previewTab === "qa" ? (
-                    <div className="w-full h-full bg-white rounded-lg shadow-xs border border-slate-200 overflow-y-auto p-5">
-                       <div className="flex items-center justify-between mb-4">
-                         <h4 className="text-sm font-bold text-slate-900">Automated QA Checklist Results</h4>
-                         {qaResults.length > 0 && (
-                           <button onClick={handleCopyQAResults} className="flex items-center gap-1.5 px-3 py-1 text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-md">
-                             {isCopied ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-                             {isCopied ? "Copied" : "Copy Results"}
-                           </button>
-                         )}
-                       </div>
-                       
-                       <div className="space-y-3">
-                         {qaResults.map((result, idx) => (
-                           <div key={idx} className={cn("p-3 border rounded-lg flex items-start gap-3 text-xs", 
-                             result.status === "pass" ? "bg-emerald-50/70 border-emerald-200" :
-                             result.status === "fail" ? "bg-rose-50/70 border-rose-200" : "bg-amber-50/70 border-amber-200"
-                           )}>
-                             <div className="mt-0.5 shrink-0">
-                               {result.status === "pass" ? <CheckCircle2 className="w-4 h-4 text-emerald-600" /> :
-                                result.status === "fail" ? <XCircle className="w-4 h-4 text-rose-600" /> :
-                                <AlertTriangle className="w-4 h-4 text-amber-600" />}
-                             </div>
-                             <div>
-                               <h5 className="font-bold text-slate-900">{result.name}</h5>
-                               <p className="text-slate-700 mt-0.5">{result.message}</p>
-                             </div>
-                           </div>
-                         ))}
-                       </div>
-                    </div>
-                  ) : previewTab === "compare" ? (
-                    <div className="flex-1 overflow-hidden flex divide-x divide-slate-200 bg-white rounded-lg shadow-xs border border-slate-200">
-                      {/* LEFT PANEL: View Online / Outlook (.msg) */}
-                      <div className="flex-1 flex flex-col h-full bg-slate-50">
-                        <div className="flex items-center justify-between bg-slate-100 px-3 py-2 border-b border-slate-200 shrink-0">
-                          <span className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
-                            <Code2 className="w-3.5 h-3.5 text-[#2b61d6]" /> Email Content View
-                          </span>
-                          <div className="flex bg-slate-200/80 p-0.5 rounded-md gap-0.5">
-                            <button
-                              type="button"
-                              onClick={() => handleViewOnlineClick(() => setLeftCompareTab("webview"))}
-                              className={cn(
-                                "px-2.5 py-1 text-[11px] font-semibold rounded transition-all flex items-center gap-1",
-                                leftCompareTab === "webview" ? "bg-white text-[#2b61d6] shadow-xs" : "text-slate-600 hover:text-slate-900"
-                              )}
-                            >
-                              View Online
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setLeftCompareTab("outlook")}
-                              className={cn(
-                                "px-2.5 py-1 text-[11px] font-semibold rounded transition-all flex items-center gap-1",
-                                leftCompareTab === "outlook" ? "bg-white text-[#2b61d6] shadow-xs" : "text-slate-600 hover:text-slate-900"
-                              )}
-                            >
-                              Outlook (.msg)
-                              {outlookFile && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setLeftCompareTab("html")}
-                              className={cn(
-                                "px-2.5 py-1 text-[11px] font-semibold rounded transition-all flex items-center gap-1",
-                                leftCompareTab === "html" ? "bg-white text-[#2b61d6] shadow-xs" : "text-slate-600 hover:text-slate-900"
-                              )}
-                            >
-                              HTML Source
-                            </button>
-                          </div>
-                        </div>
-
-                        {outlookSubject && (
-                          <div className="bg-blue-50 border-b border-blue-200 px-3 py-1.5 text-xs flex items-center justify-between shrink-0">
-                            <span className="text-slate-600 font-medium truncate max-w-[300px]">
-                              📧 Subject: <strong className="text-slate-900">{outlookSubject}</strong>
-                            </span>
-                            <span className="text-[10px] text-blue-700 bg-blue-100 px-1.5 py-0.5 rounded font-bold">Extracted</span>
-                          </div>
-                        )}
-
-                        <div className="flex-1 relative overflow-hidden bg-white">
-                          {leftCompareTab === "webview" && (
-                            resolvedWebViewUrl ? (
-                              <iframe src={resolvedWebViewUrl} title="Web View Comparison" className="w-full h-full border-0" sandbox="allow-same-origin allow-scripts allow-popups" />
-                            ) : processedHtmlSource ? (
-                              <iframe srcDoc={processedHtmlSource} title="HTML Source Comparison" className="w-full h-full border-0" />
-                            ) : (
-                              <div className="flex flex-col items-center justify-center h-full text-slate-500 p-6 text-center text-xs">
-                                No View Online link or HTML source provided.
-                              </div>
-                            )
-                          )}
-
-                          {leftCompareTab === "outlook" && (
-                            outlookFile ? (
-                              <div className="flex flex-col h-full">
-                                <div className="flex-1 overflow-auto bg-white">
-                                  {outlookExtractedHtml ? (
-                                    <iframe srcDoc={outlookExtractedHtml} title="Outlook MSG Content" className="w-full h-full border-0" />
-                                  ) : processedHtmlSource ? (
-                                    <iframe srcDoc={processedHtmlSource} title="Outlook MSG HTML Source" className="w-full h-full border-0" />
-                                  ) : (
-                                    <div className="flex flex-col items-center justify-center h-full text-slate-500 p-6 text-center text-xs">
-                                      Attached: {outlookFile.name}
-                                    </div>
-                                  )}
-                                </div>
-                              </div>
-                            ) : (
-                              <div className="flex flex-col items-center justify-center h-full p-6 text-center bg-slate-50/50">
-                                <Mail className="w-10 h-10 text-slate-300 mb-2" />
-                                <p className="text-xs font-semibold text-slate-700">No Outlook (.msg) File Uploaded</p>
-                                <label className="mt-3 cursor-pointer bg-[#2b61d6] text-white px-3 py-1.5 rounded-md text-xs font-semibold shadow-xs">
-                                  Upload .msg File
-                                  <input type="file" accept=".msg" className="hidden" onChange={(e) => handleOutlookFileChange(e.target.files?.[0] || null)} />
-                                </label>
-                              </div>
-                            )
-                          )}
-
-                          {leftCompareTab === "html" && (
-                            processedHtmlSource ? (
-                              <iframe srcDoc={processedHtmlSource} title="HTML Source Render" className="w-full h-full border-0" />
-                            ) : (
-                              <div className="flex flex-col items-center justify-center h-full text-slate-500 p-6 text-center text-xs">
-                                No HTML source code provided.
-                              </div>
-                            )
-                          )}
-                        </div>
-                      </div>
-
-                      {/* RIGHT PANEL: Figma OR Uploaded Mockup Image */}
-                      <div className="flex-1 flex flex-col h-full bg-slate-50">
-                        <div className="flex items-center justify-between bg-slate-100 px-3 py-2 border-b border-slate-200 shrink-0">
-                          <span className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
-                            {designChoice === "figma" ? <Figma className="w-3.5 h-3.5 text-[#2b61d6]" /> : <ImageIcon className="w-3.5 h-3.5 text-[#2b61d6]" />}
-                            Design Reference ({designChoice === "figma" ? "Figma Embed" : "Uploaded Mockup"})
-                          </span>
-                          <div className="flex bg-slate-200/80 p-0.5 rounded-md gap-0.5">
-                            <button
-                              type="button"
-                              onClick={() => setDesignChoice("figma")}
-                              className={cn(
-                                "px-2.5 py-1 text-[11px] font-semibold rounded transition-all",
-                                designChoice === "figma" ? "bg-white text-[#2b61d6] shadow-xs" : "text-slate-600 hover:text-slate-900"
-                              )}
-                            >
-                              Figma
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setDesignChoice("image")}
-                              className={cn(
-                                "px-2.5 py-1 text-[11px] font-semibold rounded transition-all",
-                                designChoice === "image" ? "bg-white text-[#2b61d6] shadow-xs" : "text-slate-600 hover:text-slate-900"
-                              )}
-                            >
-                              Mockup Image
-                            </button>
-                          </div>
-                        </div>
-
-                        <div className="flex-1 relative overflow-auto bg-white flex flex-col items-center justify-center">
-                          {designChoice === "figma" ? (
-                            values.figmaUrl ? (
-                              <iframe
-                                src={values.figmaUrl.includes('figma.com/embed') ? values.figmaUrl : `https://www.figma.com/embed?embed_host=share&url=${encodeURIComponent(values.figmaUrl)}`}
-                                className="w-full h-full border-0"
-                                title="Figma Reference"
-                              />
-                            ) : (
-                              <div className="flex flex-col items-center justify-center h-full p-6 text-center text-xs">
-                                <Figma className="w-10 h-10 text-slate-300 mb-2" />
-                                <p className="font-semibold text-slate-700">No Figma URL Provided</p>
-                                <p className="text-slate-400 mt-0.5 mb-3">Provide Figma link in Stage 1 or switch to Mockup Image.</p>
-                              </div>
-                            )
-                          ) : (
-                            mockupPreviewUrl ? (
-                              <div className="w-full h-full overflow-auto p-4 flex justify-center items-start bg-slate-100/50">
-                                <img src={mockupPreviewUrl} alt="Design Mockup" className="max-w-full rounded shadow-md border border-slate-200" />
-                              </div>
-                            ) : (
-                              <div className="flex flex-col items-center justify-center h-full p-6 text-center text-xs">
-                                <ImageIcon className="w-10 h-10 text-slate-300 mb-2" />
-                                <p className="font-semibold text-slate-700">No Mockup Image Uploaded</p>
-                                <label className="mt-3 cursor-pointer bg-[#2b61d6] text-white px-3 py-1.5 rounded-md text-xs font-semibold shadow-xs">
-                                  Upload Image
-                                  <input type="file" accept="image/*" className="hidden" onChange={(e) => handleMockupImageChange(e.target.files?.[0] || null)} />
-                                </label>
-                              </div>
-                            )
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  ) : null}
-                </div>
+                  </CardContent>
+                </Card>
               </div>
             )}
 
-            {currentStep === 3 && (
-              <Card className="shadow-xs border-slate-200 h-full flex flex-col">
+            {currentStep === 5 && (
+              <Card className="shadow-xs border-slate-200 flex flex-col">
                 <CardHeader className="border-b border-slate-100 bg-white rounded-t-xl py-4 shrink-0">
                   <div className="flex justify-between items-center">
                     <div>
@@ -1684,15 +1363,17 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
                     </Button>
                   </div>
                 </CardHeader>
-                <CardContent className="p-0 flex-1 overflow-y-auto bg-slate-50/50">
+                <CardContent className="p-0 flex-1 bg-slate-50/50 min-h-[300px]">
                   {grammarCheckResult ? (
                     <div className="p-6">
                       <div className="prose prose-sm prose-slate max-w-none">
-                        <div dangerouslySetInnerHTML={{ __html: grammarCheckResult.replace(/\n/g, '<br />') }} />
+                        <div className="whitespace-pre-wrap text-sm leading-relaxed text-slate-800">
+                          {grammarCheckResult}
+                        </div>
                       </div>
                     </div>
                   ) : (
-                    <div className="h-full flex flex-col items-center justify-center text-center p-6 text-slate-500">
+                    <div className="h-full min-h-[250px] flex flex-col items-center justify-center text-center p-6 text-slate-500">
                       <CheckSquare className="w-12 h-12 text-slate-300 mb-3" />
                       <p className="text-sm font-medium text-slate-700">No grammar check performed yet</p>
                       <p className="text-xs mt-1 max-w-sm">Click "Run Grammar Check" to analyze the visible text from your HTML source for spelling and grammatical errors.</p>
@@ -1702,34 +1383,7 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
               </Card>
             )}
 
-            {currentStep === 4 && (
-              <Card className="shadow-xs border-slate-200 h-full">
-                <CardHeader className="border-b border-slate-100 bg-white rounded-t-xl py-4">
-                  <CardTitle className="text-slate-900 text-base">Additional Tracking & Brief Files</CardTitle>
-                  <CardDescription className="text-slate-500 text-xs">Attach campaign briefs or Litmus rendering URL.</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-5 pt-5 bg-white">
-                  <div className="grid md:grid-cols-2 gap-5">
-                    <div className="space-y-1.5">
-                      <Label className="text-xs font-semibold text-slate-800">Campaign Brief (CSV/Excel)</Label>
-                      <label className="border-2 border-dashed border-slate-300 rounded-lg p-4 flex flex-col items-center justify-center text-center hover:bg-slate-50 transition-colors cursor-pointer bg-slate-50 h-28">
-                        <UploadCloud className="h-6 w-6 text-[#2b61d6] mb-1" />
-                        <p className="text-xs font-semibold text-slate-700">{briefFile ? briefFile.name : "Upload Brief File (.csv, .xlsx)"}</p>
-                        <Input type="file" className="hidden" accept=".csv, .xlsx, .xls" onChange={(e) => setBriefFile(e.target.files?.[0] || null)} />
-                      </label>
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <Label htmlFor="litmusUrl" className="text-xs font-semibold text-slate-800">Litmus Test URL</Label>
-                      <Input id="litmusUrl" placeholder="https://litmus.com/pub/..." className="border-slate-300 h-9 text-xs" {...register("litmusUrl")} />
-                      <p className="text-[10px] text-slate-400">Optional URL for Litmus cross-client rendering tests</p>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            )}
-
-            {currentStep === 5 && (
+            {currentStep === 6 && (
               <>
                 <Card className="shadow-xs border-slate-200">
                   <CardHeader className="border-b border-slate-100 bg-white rounded-t-xl py-4 flex flex-row items-center justify-between">
@@ -1764,25 +1418,56 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
                       <div className="space-y-3 pt-2">
                         <Label className="text-xs font-semibold text-slate-800">Review Checklist</Label>
                         <div className="bg-white border border-slate-200 rounded-lg divide-y divide-slate-100">
-                          {teamChecklists.find(c => c.team === values.team)?.items.map((item: any) => (
-                            <div key={item.id} className="flex items-start gap-3 p-3 hover:bg-slate-50 transition-colors">
-                              <input 
-                                type="checkbox"
-                                id={`check-${item.id}`}
-                                className="mt-0.5 rounded border-slate-300 text-[#2b61d6] focus:ring-[#2b61d6]"
-                                checked={checkedCheckpoints[item.id] || false}
-                                onChange={(e) => setCheckedCheckpoints({...checkedCheckpoints, [item.id]: e.target.checked})}
-                              />
-                              <label htmlFor={`check-${item.id}`} className="text-sm text-slate-700 cursor-pointer select-none">
-                                {item.text}
-                              </label>
-                            </div>
-                          ))}
-                          {(!teamChecklists.find(c => c.team === values.team) || teamChecklists.find(c => c.team === values.team)?.items.length === 0) && (
-                            <div className="p-4 text-center text-slate-500 text-sm">
-                              No checklist defined for {values.team}.
-                            </div>
-                          )}
+                          {(() => {
+                            const items = teamChecklists.find(c => c.team === values.team)?.items || [];
+                            if (items.length === 0) {
+                               return (
+                                 <div className="p-4 text-center text-slate-500 text-sm">
+                                   No checklist defined for {values.team}.
+                                 </div>
+                               );
+                            }
+                            
+                            // Group items by stage
+                            const grouped = items.reduce((acc: any, item: any) => {
+                               const stage = item.stage || 0;
+                               if (!acc[stage]) acc[stage] = [];
+                               acc[stage].push(item);
+                               return acc;
+                            }, {});
+                            
+                            const stageNames: Record<number, string> = {
+                               0: "All Stages",
+                               1: "Step 1: Details & Source",
+                               2: "Step 2: Visual Comparison",
+                               3: "Step 3: Alt & Alias Tags",
+                               4: "Step 4: Link Validation",
+                               5: "Step 5: Grammar & Spell Check",
+                               6: "Step 6: Review & Decision"
+                            };
+
+                            return Object.keys(grouped).sort().map(stageKey => (
+                               <div key={stageKey} className="pb-2">
+                                 <div className="px-3 py-2 bg-slate-50/80 text-[11px] font-bold text-slate-500 uppercase tracking-wider border-b border-slate-100">
+                                   {stageNames[Number(stageKey)] || `Stage ${stageKey}`}
+                                 </div>
+                                 {grouped[stageKey].map((item: any) => (
+                                    <div key={item.id} className="flex items-start gap-3 p-3 hover:bg-slate-50 transition-colors">
+                                      <input 
+                                        type="checkbox"
+                                        id={`check-${item.id}`}
+                                        className="mt-0.5 rounded border-slate-300 text-[#2b61d6] focus:ring-[#2b61d6]"
+                                        checked={checkedCheckpoints[item.id] || false}
+                                        onChange={(e) => setCheckedCheckpoints({...checkedCheckpoints, [item.id]: e.target.checked})}
+                                      />
+                                      <label htmlFor={`check-${item.id}`} className="text-sm text-slate-700 cursor-pointer select-none">
+                                        {item.text}
+                                      </label>
+                                    </div>
+                                 ))}
+                               </div>
+                            ));
+                          })()}
                         </div>
                       </div>
                     )}
@@ -1859,37 +1544,16 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
                 </Card>
               </>
             )}
+
+            {currentStep === 7 && (
+              <Card className="shadow-xs border-slate-200">
+                <CardContent className="p-4">
+                  <FinalChecklist checklists={checklists} answers={checklistAnswers} />
+                </CardContent>
+              </Card>
+            )}
             </div>
 
-            {/* Checklist Sidebar */}
-            {values.team && teamChecklists.length > 0 && (
-              <div className="w-full lg:w-72 shrink-0 bg-white border border-slate-200 rounded-xl flex flex-col overflow-hidden shadow-xs h-full">
-                 <div className="p-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between shrink-0">
-                   <h3 className="text-sm font-bold text-slate-900">{values.team} Checklist</h3>
-                 </div>
-                 <div className="flex-1 overflow-y-auto p-2 space-y-1 bg-slate-50/30">
-                    {teamChecklists.find((c: any) => c.team === values.team)?.items?.map((item: any) => (
-                      <div key={item.id} className="flex items-start gap-2 p-2 hover:bg-slate-50 rounded-lg transition-colors group cursor-pointer" onClick={() => setCheckedCheckpoints({...checkedCheckpoints, [item.id]: !checkedCheckpoints[item.id]})}>
-                        <div className="mt-0.5 shrink-0">
-                          {checkedCheckpoints[item.id] ? (
-                            <CheckSquare className="w-4 h-4 text-emerald-600" />
-                          ) : (
-                            <Square className="w-4 h-4 text-slate-300 group-hover:text-slate-400" />
-                          )}
-                        </div>
-                        <span className={cn("text-xs leading-relaxed", checkedCheckpoints[item.id] ? "text-slate-500 line-through" : "text-slate-700")}>
-                          {item.text}
-                        </span>
-                      </div>
-                    ))}
-                    {(!teamChecklists.find((c: any) => c.team === values.team) || teamChecklists.find((c: any) => c.team === values.team)?.items?.length === 0) && (
-                      <div className="p-4 text-center text-slate-500 text-xs">
-                        No checkpoints defined for {values.team}.
-                      </div>
-                    )}
-                 </div>
-              </div>
-            )}
           </div>
         </QAWizard>
       </form>

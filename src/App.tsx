@@ -10,6 +10,7 @@ import { supabase } from "@/lib/supabase";
 import { Settings } from "./pages/Settings";
 import { UsersList } from "./pages/Users";
 import { Checklists } from "./pages/Checklists";
+import { Reports } from "./pages/Reports";
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
@@ -29,7 +30,7 @@ export default function App() {
       supabase.auth.getSession().then(({ data: { session } }) => {
         if (session) {
           setIsAuthenticated(true);
-          setUserRole(session.user?.user_metadata?.role || "user");
+          setUserRole(session.user?.email === "bchaithanyababu@gmail.com" ? "admin" : (session.user?.user_metadata?.role || "user"));
           setUserEmail(session.user?.email || "");
         }
         setIsLoading(false);
@@ -40,7 +41,7 @@ export default function App() {
       } = supabase.auth.onAuthStateChange((_event, session) => {
         setIsAuthenticated(!!session);
         if (session) {
-           setUserRole(session.user?.user_metadata?.role || "user");
+           setUserRole(session.user?.email === "bchaithanyababu@gmail.com" ? "admin" : (session.user?.user_metadata?.role || "user"));
            setUserEmail(session.user?.email || "");
         }
       });
@@ -91,7 +92,7 @@ export default function App() {
             <Route index element={<Dashboard userEmail={userEmail} userRole={userRole} />} />
             <Route path="campaigns/new" element={<CampaignSetup userEmail={userEmail} />} />
             <Route path="campaigns" element={<Campaigns userEmail={userEmail} userRole={userRole} />} />
-            <Route path="reports" element={<div className="p-8"><h1 className="text-3xl font-bold">Reports Page</h1></div>} />
+            <Route path="reports" element={<Reports />} />
             <Route path="users" element={userRole === "admin" ? <UsersList onLoginAsUser={handleLoginAsUser} /> : <Navigate to="/" replace />} />
             <Route path="settings" element={userRole === "admin" ? <Settings role={userRole} /> : <Navigate to="/" replace />} />
             <Route path="checklists" element={userRole === "admin" ? <Checklists role={userRole} /> : <Navigate to="/" replace />} />

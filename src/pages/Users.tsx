@@ -106,7 +106,6 @@ export function UsersList({ onLoginAsUser }: { onLoginAsUser?: (email: string, r
   };
 
   const deleteUser = async (id: string) => {
-    if (!window.confirm("Are you sure you want to delete this user?")) return;
     const { error } = await supabase.from('app_users').delete().eq('id', id);
     if (!error) {
       await loadData();
