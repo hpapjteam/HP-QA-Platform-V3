@@ -1,6 +1,23 @@
 -- HP QA Application - Safe & Fully Compatible Supabase Database Schema
 -- Run this script in your Supabase SQL Editor (Dashboard -> SQL Editor -> New Query -> Run)
 
+-- 0. FOLDERS TABLE
+CREATE TABLE IF NOT EXISTS public.folders (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  parent_id TEXT,
+  year TEXT DEFAULT '2026',
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE public.folders ADD COLUMN IF NOT EXISTS parent_id TEXT;
+ALTER TABLE public.folders ADD COLUMN IF NOT EXISTS year TEXT DEFAULT '2026';
+ALTER TABLE public.folders ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+
+ALTER TABLE public.folders ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Public access for folders" ON public.folders;
+CREATE POLICY "Public access for folders" ON public.folders FOR ALL USING (true) WITH CHECK (true);
+
 -- 1. CAMPAIGNS TABLE
 CREATE TABLE IF NOT EXISTS public.campaigns (
   id TEXT PRIMARY KEY,

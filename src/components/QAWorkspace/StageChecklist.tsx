@@ -11,9 +11,10 @@ interface StageChecklistProps {
   answers: Record<string, any>;
   setAnswers: (answers: Record<string, any>) => void;
   showError: boolean;
+  disabled?: boolean;
 }
 
-export function StageChecklist({ currentStep, checklists, answers, setAnswers, showError }: StageChecklistProps) {
+export function StageChecklist({ currentStep, checklists, answers, setAnswers, showError, disabled }: StageChecklistProps) {
   const currentItems = checklists.filter(c => c.stage === currentStep || c.stage === 0);
   
   if (currentItems.length === 0) return null;
@@ -54,7 +55,8 @@ export function StageChecklist({ currentStep, checklists, answers, setAnswers, s
               variant="outline"
               size="sm"
               onClick={handleToggleAll}
-              className="text-[11px] h-6 px-2 font-medium text-slate-700 border-slate-300 hover:bg-slate-50"
+              disabled={disabled}
+              className="text-[11px] h-6 px-2 font-medium text-slate-700 border-slate-300 hover:bg-slate-50 disabled:opacity-50"
             >
               {currentItems.every(item => answers[item.id]?.status === "Checked") ? "Uncheck All" : "Check All"}
             </Button>
@@ -90,11 +92,13 @@ export function StageChecklist({ currentStep, checklists, answers, setAnswers, s
                     <input 
                       type="checkbox" 
                       checked={isChecked}
+                      disabled={disabled}
                       onChange={(e) => {
+                        if (disabled) return;
                         const newStatus = e.target.checked ? "Checked" : null;
                         setAnswers({ ...answers, [item.id]: { ...ans, status: newStatus } });
                       }}
-                      className="w-3.5 h-3.5 rounded text-emerald-600 focus:ring-emerald-500 border-slate-300 cursor-pointer shrink-0 mt-0.5"
+                      className="w-3.5 h-3.5 rounded text-emerald-600 focus:ring-emerald-500 border-slate-300 cursor-pointer disabled:cursor-not-allowed shrink-0 mt-0.5"
                     />
                     <span className={cn("text-[11px] md:text-xs leading-snug font-medium", isChecked ? "text-slate-900 font-semibold" : isNA ? "text-slate-400 line-through" : "text-slate-700")}>
                       <span className="text-slate-400 font-semibold mr-1">{index + 1}.</span>
@@ -104,12 +108,14 @@ export function StageChecklist({ currentStep, checklists, answers, setAnswers, s
 
                   <button
                     type="button"
+                    disabled={disabled}
                     onClick={() => {
+                      if (disabled) return;
                       const newStatus = isNA ? null : "N/A";
                       setAnswers({ ...answers, [item.id]: { ...ans, status: newStatus, text: newStatus === "N/A" ? "" : ans.text } });
                     }}
                     className={cn(
-                      "text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border shrink-0 transition-all cursor-pointer select-none",
+                      "text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border shrink-0 transition-all cursor-pointer select-none disabled:opacity-50 disabled:cursor-not-allowed",
                       isNA 
                         ? "bg-slate-700 text-white border-slate-700" 
                         : "bg-white text-slate-500 border-slate-200 hover:bg-slate-100 hover:text-slate-800"
@@ -126,8 +132,12 @@ export function StageChecklist({ currentStep, checklists, answers, setAnswers, s
                       <Input 
                         placeholder={item.inputPlaceholder || "Enter details..."}
                         value={ans.text || ""}
-                        onChange={(e) => setAnswers({ ...answers, [item.id]: { ...ans, text: e.target.value } })}
-                        className={cn("pl-7 h-7 text-[11px] bg-white", isInvalid && !ans.text?.trim() ? "border-rose-400 focus-visible:ring-rose-500" : "border-slate-200")}
+                        disabled={disabled}
+                        onChange={(e) => {
+                          if (disabled) return;
+                          setAnswers({ ...answers, [item.id]: { ...ans, text: e.target.value } });
+                        }}
+                        className={cn("pl-7 h-7 text-[11px] bg-white disabled:bg-slate-100", isInvalid && !ans.text?.trim() ? "border-rose-400 focus-visible:ring-rose-500" : "border-slate-200")}
                       />
                     </div>
                   </div>

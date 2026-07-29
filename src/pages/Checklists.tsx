@@ -4,19 +4,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
+import { fetchPlatformChecklists, savePlatformChecklists, TeamChecklist, ChecklistItem } from "@/lib/checklist-storage";
 
-export interface ChecklistItem {
-  id: string;
-  text: string;
-  stage?: number;
-  requiresInput?: boolean;
-  inputPlaceholder?: string;
-}
-
-export interface TeamChecklist {
-  team: string;
-  items: ChecklistItem[];
-}
+export type { ChecklistItem, TeamChecklist };
 
 export function Checklists({ role }: { role: string }) {
   const [checklists, setChecklists] = useState<TeamChecklist[]>([]);
@@ -44,78 +34,17 @@ export function Checklists({ role }: { role: string }) {
     };
     fetchTeams();
 
-    const fetchChecklists = async () => {
-      if (isDb) {
-        const { data, error } = await supabase.from('checklists').select('*');
-        if (!error && data && data.length > 0) {
-          const loaded: TeamChecklist[] = data.map((row: any) => ({
-            team: row.team,
-            items: row.items || []
-          }));
-          setChecklists(loaded);
-          localStorage.setItem("platform_checklists", JSON.stringify(loaded));
-          return;
-        }
-      }
-
-      // Load from local storage or defaults
-      const stored = localStorage.getItem("platform_checklists");
-      if (stored) {
-        setChecklists(JSON.parse(stored));
-      } else {
-        const defaults: TeamChecklist[] = [
-          {
-            team: "HP-APJ",
-            items: [
-              { id: "1", text: "Verify APJ specific legal compliance", stage: 0 },
-              { id: "2", text: "Check translations for APAC regions", stage: 0 }
-            ]
-          },
-          {
-            team: "HP-EMEA",
-            items: [
-              { id: "3", text: "Ensure GDPR compliance points are met", stage: 0 },
-              { id: "4", text: "Verify EMEA pricing formats", stage: 0 }
-            ]
-          }
-        ];
-        setChecklists(defaults);
-        localStorage.setItem("platform_checklists", JSON.stringify(defaults));
-
-        if (isDb) {
-          // Push defaults to DB
-          for (const item of defaults) {
-            await supabase.from('checklists').upsert({
-              id: item.team,
-              team: item.team,
-              title: `${item.team} Checklist`,
-              items: item.items,
-              updated_at: new Date().toISOString()
-            });
-          }
-        }
-      }
+    const loadChecklists = async () => {
+      const data = await fetchPlatformChecklists();
+      setChecklists(data);
     };
 
-    fetchChecklists();
+    loadChecklists();
   }, []);
 
   const saveChecklists = async (newChecklists: TeamChecklist[]) => {
     setChecklists(newChecklists);
-    localStorage.setItem("platform_checklists", JSON.stringify(newChecklists));
-
-    if (isSupabaseConfigured()) {
-      const activeObj = newChecklists.find(c => c.team === activeTeam);
-      if (activeObj) {
-        await supabase.from('checklists').upsert({
-          id: activeTeam,
-          team: activeTeam,
-          title: `${activeTeam} Checklist`,
-          items: activeObj.items,
-          updated_at: new Date().toISOString()
-        });
-      }
-    }
+    await savePlatformChecklists(newChecklists);
   };
 
   const activeChecklist = checklists.find(c => c.team === activeTeam) || { team: activeTeam, items: [] };

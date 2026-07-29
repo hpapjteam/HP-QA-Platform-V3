@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { 
   getAllCampaigns, 
   getFolders, 
+  fetchFolders,
   createFolder, 
   renameFolder,
   deleteFolder,
@@ -10,12 +11,17 @@ import {
   restoreCampaign, 
   permanentlyDeleteCampaign, 
   moveCampaignToFolder,
+  syncAllCampaignsToDatabase,
+  auditAndSyncCampaigns,
+  isUUID,
+  ensureUuid,
+  SyncAuditResult,
   CampaignRecord, 
   FolderItem 
 } from "@/lib/campaign-storage";
 import { getCampaignCheckpointProgress } from "@/lib/checklist-utils";
 import { logAction } from "@/lib/logger";
-import { supabase } from "@/lib/supabase";
+import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { 
   PlusCircle, 
   Search, 
@@ -37,21 +43,26 @@ import {
   AlertTriangle,
   GripVertical,
   ChevronDown,
+  RefreshCw,
+  Database,
   ChevronRight,
   Home,
   ArrowLeft,
   X,
-  Globe
+  Globe,
+  ShieldCheck,
+  Check,
+  FileText,
+  PanelLeftClose,
+  PanelLeftOpen
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const TABS = [
   { id: "all", label: "All Campaigns" },
-  { id: "drafts", label: "Drafts" },
-  { id: "active", label: "Active" },
-  { id: "review", label: "Needs Review" },
-  { id: "completed", label: "Completed" },
-  { id: "recycle_bin", label: "Recycle Bin", isRecycle: true }
+  { id: "inprogress", label: "In Progress" },
+  { id: "approved", label: "Approved" },
+  { id: "failed", label: "Failed" }
 ];
 
 export function Campaigns({ userEmail = "admin@example.com", userRole }: { userEmail?: string; userRole?: string }) {
@@ -61,6 +72,7 @@ export function Campaigns({ userEmail = "admin@example.com", userRole }: { userE
   const [folders, setFolders] = useState<FolderItem[]>([]);
   const [selectedFolderId, setSelectedFolderId] = useState<string>("all");
   const [collapsedFolders, setCollapsedFolders] = useState<Record<string, boolean>>({});
+  const [isFolderSidebarCollapsed, setIsFolderSidebarCollapsed] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchScope, setSearchScope] = useState<"all" | "current">("all");
 
@@ -85,6 +97,34 @@ export function Campaigns({ userEmail = "admin@example.com", userRole }: { userE
   const [draggedCampaignId, setDraggedCampaignId] = useState<string | null>(null);
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null);
   const [toastNotice, setToastNotice] = useState<string | null>(null);
+  const [isSyncingDb, setIsSyncingDb] = useState<boolean>(false);
+  const [syncAuditResult, setSyncAuditResult] = useState<SyncAuditResult | null>(null);
+  const [showSyncAuditModal, setShowSyncAuditModal] = useState<boolean>(false);
+
+  const handleRunSyncAudit = async () => {
+    setIsSyncingDb(true);
+    try {
+      const result = await auditAndSyncCampaigns();
+      setSyncAuditResult(result);
+      setShowSyncAuditModal(true);
+      await loadData();
+
+      if (result.status === 'success') {
+        setToastNotice(`✓ Supabase Sync & Verification Complete! ${result.syncedCount} campaign(s) verified in remote database.`);
+      } else if (result.status === 'partial') {
+        setToastNotice(`⚠️ Sync Partial: ${result.syncedCount} synced, ${result.failedCount + result.invalidCount} issue(s) flagged.`);
+      } else {
+        setToastNotice(`❌ Sync Failed: ${result.transmissionErrors.length + result.validationErrors.length} error(s). Click "Retry Sync" to view audit.`);
+      }
+      setTimeout(() => setToastNotice(null), 5000);
+    } catch (err) {
+      console.error("[Campaigns] Manual sync audit error:", err);
+      setToastNotice("⚠️ Database sync failed. Check your network or Supabase connection.");
+      setTimeout(() => setToastNotice(null), 5000);
+    } finally {
+      setIsSyncingDb(false);
+    }
+  };
 
   // Delete Confirmation Modal
   const [deleteTarget, setDeleteTarget] = useState<CampaignRecord | null>(null);
@@ -98,7 +138,7 @@ export function Campaigns({ userEmail = "admin@example.com", userRole }: { userE
 
   const loadData = async () => {
     console.log("[Campaigns Page] Refreshing campaigns & folders data...");
-    const folderList = getFolders();
+    const folderList = await fetchFolders();
     setFolders(folderList);
 
     const campaignList = await getAllCampaigns();
@@ -113,8 +153,27 @@ export function Campaigns({ userEmail = "admin@example.com", userRole }: { userE
     };
 
     window.addEventListener("database-synced", handleSynced);
+
+    let realtimeChannel: any = null;
+    if (isSupabaseConfigured()) {
+      try {
+        realtimeChannel = supabase
+          .channel("campaigns-realtime-changes")
+          .on("postgres_changes", { event: "*", schema: "public", table: "campaigns" }, () => {
+            console.log("[Campaigns] Supabase realtime change detected, refreshing campaigns...");
+            loadData();
+          })
+          .subscribe();
+      } catch (err) {
+        console.warn("[Campaigns] Could not subscribe to Supabase Realtime:", err);
+      }
+    }
+
     return () => {
       window.removeEventListener("database-synced", handleSynced);
+      if (realtimeChannel) {
+        supabase.removeChannel(realtimeChannel);
+      }
     };
   }, [userEmail]);
 
@@ -229,10 +288,11 @@ export function Campaigns({ userEmail = "admin@example.com", userRole }: { userE
 
     try {
       if (import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_URL !== 'https://placeholder.supabase.co') {
+        const targetId = isUUID(String(id)) ? String(id) : ensureUuid(String(id));
         await supabase.from("campaigns").update({ 
           status: newStatus, 
           updated_at: new Date().toISOString() 
-        }).eq("id", id);
+        }).eq("id", targetId);
       }
     } catch (err) {
       console.warn("Supabase status update skipped/failed:", err);
@@ -340,19 +400,13 @@ export function Campaigns({ userEmail = "admin@example.com", userRole }: { userE
       }
     }
 
-    // Recycle bin tab logic
-    if (activeTab === "recycle_bin") {
-      return c.is_deleted === true;
-    } else {
-      // Hide deleted campaigns from normal tabs
-      if (c.is_deleted) return false;
-    }
+    // Hide deleted campaigns from campaigns view
+    if (c.is_deleted) return false;
 
     if (activeTab === "all") return true;
-    if (activeTab === "drafts") return c.status === "Draft";
-    if (activeTab === "active" && c.status !== "Completed" && c.status !== "Approved" && c.status !== "Failed") return true;
-    if (activeTab === "review" && (c.status === "Failed" || c.status === "QA Pending" || c.status === "Review Pending")) return true;
-    if (activeTab === "completed" && (c.status === "Completed" || c.status === "Approved")) return true;
+    if (activeTab === "inprogress") return c.status === "In Progress" || c.status === "QA Pending" || c.status === "Review Pending" || c.status === "Draft" || c.status === "Active";
+    if (activeTab === "approved") return c.status === "Approved" || c.status === "Completed";
+    if (activeTab === "failed") return c.status === "Failed";
 
     return true;
   });
@@ -368,6 +422,13 @@ export function Campaigns({ userEmail = "admin@example.com", userRole }: { userE
     return found.name;
   };
 
+  // Top Stats calculation across non-deleted campaigns
+  const nonDeletedCampaigns = campaigns.filter(c => !c.is_deleted);
+  const countAll = nonDeletedCampaigns.length;
+  const countInProgress = nonDeletedCampaigns.filter(c => c.status === "In Progress" || c.status === "QA Pending" || c.status === "Review Pending" || c.status === "Draft" || c.status === "Active").length;
+  const countApproved = nonDeletedCampaigns.filter(c => c.status === "Approved" || c.status === "Completed").length;
+  const countFailed = nonDeletedCampaigns.filter(c => c.status === "Failed").length;
+
   return (
     <div className="flex flex-col h-full bg-slate-50">
       {/* Header */}
@@ -376,10 +437,46 @@ export function Campaigns({ userEmail = "admin@example.com", userRole }: { userE
           <h2 className="text-2xl font-bold tracking-tight text-slate-900">Campaigns & Folder Directory</h2>
           <p className="text-xs text-slate-500 mt-0.5">Manage, organize by year/folders, QA validate, and restore deleted campaigns</p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
+          {isSupabaseConfigured() && !isSyncingDb && syncAuditResult?.status === 'success' ? (
+            <button
+              onClick={handleRunSyncAudit}
+              className="px-3 py-2 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 rounded-md text-xs font-bold transition-all inline-flex items-center gap-1.5 border border-emerald-200 shadow-xs cursor-pointer"
+              title="Database synchronized & verified with Supabase. Click to re-audit."
+            >
+              <Check className="h-3.5 w-3.5 text-emerald-600 stroke-[3]" />
+              <span>Synced</span>
+            </button>
+          ) : (
+            <button
+              onClick={handleRunSyncAudit}
+              disabled={isSyncingDb}
+              className="px-3.5 py-2 bg-blue-50 text-[#2b61d6] hover:bg-blue-100 rounded-md text-xs font-bold transition-colors inline-flex items-center gap-1.5 border border-blue-200 shadow-xs cursor-pointer disabled:opacity-50"
+              title="Sync local records with Supabase database"
+            >
+              <RefreshCw className={cn("h-3.5 w-3.5 text-[#2b61d6]", isSyncingDb && "animate-spin")} />
+              {isSyncingDb ? "Syncing..." : "Sync Database"}
+            </button>
+          )}
+
+          {syncAuditResult && (
+            <button
+              onClick={() => setShowSyncAuditModal(true)}
+              className={cn(
+                "px-2.5 py-2 rounded-md text-xs font-semibold inline-flex items-center gap-1 border transition-colors cursor-pointer",
+                syncAuditResult.status === 'success' 
+                  ? "bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100"
+                  : "bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100"
+              )}
+              title="View last database sync audit report"
+            >
+              <Database className="w-3.5 h-3.5" />
+              <span>Audit Report</span>
+            </button>
+          )}
           <button
             onClick={() => setShowFolderModal(true)}
-            className="px-3.5 py-2 bg-slate-100 text-slate-700 hover:bg-slate-200 rounded-md text-xs font-semibold transition-colors inline-flex items-center gap-1.5 border border-slate-300 shadow-xs"
+            className="px-3.5 py-2 bg-slate-100 text-slate-700 hover:bg-slate-200 rounded-md text-xs font-semibold transition-colors inline-flex items-center gap-1.5 border border-slate-300 shadow-xs cursor-pointer"
           >
             <FolderPlus className="h-4 w-4 text-[#2b61d6]" />
             New Folder
@@ -396,204 +493,344 @@ export function Campaigns({ userEmail = "admin@example.com", userRole }: { userE
 
       <div className="flex flex-1 overflow-hidden">
         {/* Left Sidebar: Folder Navigation */}
-        <aside className="w-64 bg-white border-r border-slate-200 p-4 flex flex-col shrink-0 overflow-y-auto">
-          <div className="flex items-center justify-between mb-3 px-2">
-            <span className="text-xs font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
-              <Folder className="w-3.5 h-3.5 text-[#2b61d6]" />
-              Folders & Years
-            </span>
-            <button
-              onClick={() => setShowFolderModal(true)}
-              className="text-xs text-[#2b61d6] hover:underline font-semibold"
-            >
-              + Add
-            </button>
-          </div>
-
-          <nav className="space-y-1">
-            <button
-              onClick={() => setSelectedFolderId("all")}
-              onDragOver={(e) => handleDragOver(e, "all")}
-              onDragLeave={() => handleDragLeave("all")}
-              onDrop={(e) => handleDrop(e, "all")}
-              className={cn(
-                "w-full text-left px-3 py-2 rounded-lg text-xs font-medium flex items-center justify-between transition-all cursor-pointer",
-                dragOverFolderId === "all"
-                  ? "bg-blue-100 border-2 border-dashed border-[#2b61d6] scale-[1.02] text-[#2b61d6] font-bold shadow-xs"
-                  : selectedFolderId === "all"
-                  ? "bg-blue-50 text-[#2b61d6] font-semibold"
-                  : "text-slate-700 hover:bg-slate-100"
-              )}
-            >
-              <span className="flex items-center gap-2">
-                <FolderOpen className="w-4 h-4 text-blue-600" />
-                All Folders & Files
-              </span>
-              <span className="text-[10px] bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded-full">
-                {campaigns.filter(c => !c.is_deleted).length}
-              </span>
-            </button>
-
-            {/* Render Year folders (parentId == null) */}
-            {folders.filter(f => f.parentId === null).map((yearFolder) => {
-              const childFolders = folders.filter(f => f.parentId === yearFolder.id);
-              const isSelected = selectedFolderId === yearFolder.id;
-              const yearCount = campaigns.filter(c => !c.is_deleted && (c.folder_id === yearFolder.id || childFolders.some(ch => ch.id === c.folder_id))).length;
-              const isDragOver = dragOverFolderId === yearFolder.id;
-              const isCollapsed = !!collapsedFolders[yearFolder.id];
-
-              return (
-                <div key={yearFolder.id} className="space-y-0.5">
-                  <div
-                    onClick={() => setSelectedFolderId(yearFolder.id)}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      setFolderToRename(yearFolder);
-                      setRenameValue(yearFolder.name);
+        <aside className={cn(
+          "bg-white border-r border-slate-200 flex flex-col shrink-0 transition-all duration-200 overflow-y-auto",
+          isFolderSidebarCollapsed ? "w-14 p-2 items-center" : "w-64 p-4"
+        )}>
+          {isFolderSidebarCollapsed ? (
+            <div className="flex flex-col items-center gap-3 w-full">
+              <button
+                type="button"
+                onClick={() => setIsFolderSidebarCollapsed(false)}
+                className="p-2 text-slate-500 hover:text-[#2b61d6] hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+                title="Expand Folders Menu"
+              >
+                <PanelLeftOpen className="w-5 h-5 text-[#2b61d6]" />
+              </button>
+              <div className="w-full h-px bg-slate-200" />
+              <button
+                type="button"
+                onClick={() => setSelectedFolderId("all")}
+                className={cn(
+                  "p-2 rounded-lg transition-colors cursor-pointer",
+                  selectedFolderId === "all" ? "bg-blue-100 text-[#2b61d6]" : "text-slate-600 hover:bg-slate-100"
+                )}
+                title="All Folders & Files"
+              >
+                <FolderOpen className="w-5 h-5 text-blue-600" />
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="flex items-center justify-between mb-3 px-1">
+                <div className="flex items-center gap-1.5">
+                  <Folder className="w-4 h-4 text-[#2b61d6]" />
+                  <span className="text-xs font-bold uppercase tracking-wider text-slate-700">
+                    Folders Menu
+                  </span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const allIds = folders.map(f => f.id);
+                      const areAllCollapsed = allIds.length > 0 && allIds.every(id => collapsedFolders[id]);
+                      if (areAllCollapsed) {
+                        setCollapsedFolders({});
+                      } else {
+                        const newColl: Record<string, boolean> = {};
+                        allIds.forEach(id => { newColl[id] = true; });
+                        setCollapsedFolders(newColl);
+                      }
                     }}
-                    onDragOver={(e) => handleDragOver(e, yearFolder.id)}
-                    onDragLeave={() => handleDragLeave(yearFolder.id)}
-                    onDrop={(e) => handleDrop(e, yearFolder.id)}
-                    className={cn(
-                      "w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-between transition-all mt-1 cursor-pointer group/item",
-                      isDragOver
-                        ? "bg-blue-100 border-2 border-dashed border-[#2b61d6] scale-[1.02] text-[#2b61d6] font-bold shadow-xs"
-                        : isSelected
-                        ? "bg-blue-50 text-[#2b61d6]"
-                        : "text-slate-800 hover:bg-slate-100"
-                    )}
+                    className="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-700 rounded text-[11px] font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                    title="Toggle expand or collapse all folder trees"
                   >
-                    <span className="flex items-center gap-1.5 truncate">
-                      {childFolders.length > 0 ? (
-                        <button
-                          type="button"
-                          onClick={(e) => toggleFolderCollapse(yearFolder.id, e)}
-                          className="p-0.5 hover:bg-slate-200 rounded text-slate-500 hover:text-slate-900 transition-colors shrink-0"
-                          title={isCollapsed ? "Expand subfolders" : "Collapse subfolders"}
-                        >
-                          {isCollapsed ? <ChevronRight className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-                        </button>
-                      ) : (
-                        <span className="w-4 shrink-0" />
-                      )}
-                      <Calendar className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-                      <span className="truncate">{yearFolder.name}</span>
-                    </span>
-                    <div className="flex items-center gap-1 shrink-0">
-                      <span className="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded-full border border-slate-200">
-                        {yearCount}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setFolderToDelete(yearFolder);
-                        }}
-                        title={`Delete folder "${yearFolder.name}"`}
-                        className="opacity-0 group-hover/item:opacity-100 p-0.5 hover:bg-rose-100 text-slate-400 hover:text-rose-600 rounded transition-opacity"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                      </button>
-                    </div>
-                  </div>
+                    {folders.length > 0 && folders.every(f => collapsedFolders[f.id]) ? (
+                      <>
+                        <ChevronRight className="w-3 h-3 text-[#2b61d6]" />
+                        <span>Expand All</span>
+                      </>
+                    ) : (
+                      <>
+                        <ChevronDown className="w-3 h-3 text-[#2b61d6]" />
+                        <span>Collapse All</span>
+                      </>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowFolderModal(true)}
+                    className="text-xs text-[#2b61d6] hover:underline font-semibold px-1"
+                    title="Create new folder"
+                  >
+                    + Add
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsFolderSidebarCollapsed(true)}
+                    className="p-1 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded transition-colors cursor-pointer ml-1"
+                    title="Collapse sidebar panel"
+                  >
+                    <PanelLeftClose className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
 
-                  {/* Subfolders (visible if not collapsed) */}
-                  {!isCollapsed && childFolders.map((sub) => {
-                    const subSelected = selectedFolderId === sub.id;
-                    const subCount = campaigns.filter(c => !c.is_deleted && c.folder_id === sub.id).length;
-                    const isSubDragOver = dragOverFolderId === sub.id;
+              <nav className="space-y-1">
+                <button
+                  onClick={() => setSelectedFolderId("all")}
+                  onDragOver={(e) => handleDragOver(e, "all")}
+                  onDragLeave={() => handleDragLeave("all")}
+                  onDrop={(e) => handleDrop(e, "all")}
+                  className={cn(
+                    "w-full text-left px-3 py-2 rounded-lg text-xs font-medium flex items-center justify-between transition-all cursor-pointer",
+                    dragOverFolderId === "all"
+                      ? "bg-blue-100 border-2 border-dashed border-[#2b61d6] scale-[1.02] text-[#2b61d6] font-bold shadow-xs"
+                      : selectedFolderId === "all"
+                      ? "bg-blue-50 text-[#2b61d6] font-semibold"
+                      : "text-slate-700 hover:bg-slate-100"
+                  )}
+                >
+                  <span className="flex items-center gap-2">
+                    <FolderOpen className="w-4 h-4 text-blue-600" />
+                    All Folders & Files
+                  </span>
+                  <span className="text-[10px] bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded-full font-semibold">
+                    {campaigns.filter(c => !c.is_deleted).length}
+                  </span>
+                </button>
 
-                    return (
+                {/* Render Year folders (parentId == null) */}
+                {folders.filter(f => f.parentId === null).map((yearFolder) => {
+                  const childFolders = folders.filter(f => f.parentId === yearFolder.id);
+                  const isSelected = selectedFolderId === yearFolder.id;
+                  const yearCount = campaigns.filter(c => !c.is_deleted && (c.folder_id === yearFolder.id || childFolders.some(ch => ch.id === c.folder_id))).length;
+                  const isDragOver = dragOverFolderId === yearFolder.id;
+                  const isCollapsed = !!collapsedFolders[yearFolder.id];
+
+                  return (
+                    <div key={yearFolder.id} className="space-y-0.5">
                       <div
-                        key={sub.id}
-                        onClick={() => setSelectedFolderId(sub.id)}
+                        onClick={() => setSelectedFolderId(yearFolder.id)}
                         onContextMenu={(e) => {
                           e.preventDefault();
-                          setFolderToRename(sub);
-                          setRenameValue(sub.name);
+                          setFolderToRename(yearFolder);
+                          setRenameValue(yearFolder.name);
                         }}
-                        onDragOver={(e) => handleDragOver(e, sub.id)}
-                        onDragLeave={() => handleDragLeave(sub.id)}
-                        onDrop={(e) => handleDrop(e, sub.id)}
+                        onDragOver={(e) => handleDragOver(e, yearFolder.id)}
+                        onDragLeave={() => handleDragLeave(yearFolder.id)}
+                        onDrop={(e) => handleDrop(e, yearFolder.id)}
                         className={cn(
-                          "w-full text-left pl-8 pr-3 py-1 rounded-md text-[11px] font-medium flex items-center justify-between transition-all cursor-pointer group/subitem",
-                          isSubDragOver
+                          "w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-between transition-all mt-1 cursor-pointer group/item",
+                          isDragOver
                             ? "bg-blue-100 border-2 border-dashed border-[#2b61d6] scale-[1.02] text-[#2b61d6] font-bold shadow-xs"
-                            : subSelected
-                            ? "bg-blue-100 text-[#2b61d6] font-semibold"
-                            : "text-slate-600 hover:bg-slate-100"
+                            : isSelected
+                            ? "bg-blue-50 text-[#2b61d6]"
+                            : "text-slate-800 hover:bg-slate-100"
                         )}
                       >
                         <span className="flex items-center gap-1.5 truncate">
-                          <Folder className="w-3 h-3 text-slate-400" />
-                          {sub.name}
+                          {childFolders.length > 0 ? (
+                            <button
+                              type="button"
+                              onClick={(e) => toggleFolderCollapse(yearFolder.id, e)}
+                              className="p-0.5 hover:bg-slate-200 rounded text-slate-500 hover:text-slate-900 transition-colors shrink-0"
+                              title={isCollapsed ? "Expand subfolders" : "Collapse subfolders"}
+                            >
+                              {isCollapsed ? <ChevronRight className="w-3.5 h-3.5 text-[#2b61d6]" /> : <ChevronDown className="w-3.5 h-3.5 text-[#2b61d6]" />}
+                            </button>
+                          ) : (
+                            <span className="w-4 shrink-0" />
+                          )}
+                          <Calendar className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                          <span className="truncate">{yearFolder.name}</span>
                         </span>
-                        <div className="flex items-center gap-1">
-                          <span className="text-[9px] text-slate-500 font-normal">
-                            {subCount}
+                        <div className="flex items-center gap-1 shrink-0">
+                          <span className="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded-full border border-slate-200 font-semibold">
+                            {yearCount}
                           </span>
                           <button
                             type="button"
                             onClick={(e) => {
                               e.stopPropagation();
-                              setFolderToDelete(sub);
+                              setFolderToDelete(yearFolder);
                             }}
-                            title={`Delete folder "${sub.name}"`}
-                            className="opacity-0 group-hover/subitem:opacity-100 p-0.5 hover:bg-rose-100 text-slate-400 hover:text-rose-600 rounded transition-opacity"
+                            title={`Delete folder "${yearFolder.name}"`}
+                            className="opacity-0 group-hover/item:opacity-100 p-0.5 hover:bg-rose-100 text-slate-400 hover:text-rose-600 rounded transition-opacity"
                           >
-                            <Trash2 className="w-2.5 h-2.5" />
+                            <Trash2 className="w-3 h-3" />
                           </button>
                         </div>
                       </div>
-                    );
-                  })}
-                </div>
-              );
-            })}
-          </nav>
+
+                      {/* Subfolders (visible if not collapsed) */}
+                      {!isCollapsed && childFolders.map((sub) => {
+                        const subSelected = selectedFolderId === sub.id;
+                        const subCount = campaigns.filter(c => !c.is_deleted && c.folder_id === sub.id).length;
+                        const isSubDragOver = dragOverFolderId === sub.id;
+
+                        return (
+                          <div
+                            key={sub.id}
+                            onClick={() => setSelectedFolderId(sub.id)}
+                            onContextMenu={(e) => {
+                              e.preventDefault();
+                              setFolderToRename(sub);
+                              setRenameValue(sub.name);
+                            }}
+                            onDragOver={(e) => handleDragOver(e, sub.id)}
+                            onDragLeave={() => handleDragLeave(sub.id)}
+                            onDrop={(e) => handleDrop(e, sub.id)}
+                            className={cn(
+                              "w-full text-left pl-8 pr-3 py-1 rounded-md text-[11px] font-medium flex items-center justify-between transition-all cursor-pointer group/subitem",
+                              isSubDragOver
+                                ? "bg-blue-100 border-2 border-dashed border-[#2b61d6] scale-[1.02] text-[#2b61d6] font-bold shadow-xs"
+                                : subSelected
+                                ? "bg-blue-100 text-[#2b61d6] font-semibold"
+                                : "text-slate-600 hover:bg-slate-100"
+                            )}
+                          >
+                            <span className="flex items-center gap-1.5 truncate">
+                              <Folder className="w-3 h-3 text-slate-400" />
+                              {sub.name}
+                            </span>
+                            <div className="flex items-center gap-1">
+                              <span className="text-[9px] text-slate-500 font-normal">
+                                {subCount}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setFolderToDelete(sub);
+                                }}
+                                title={`Delete folder "${sub.name}"`}
+                                className="opacity-0 group-hover/subitem:opacity-100 p-0.5 hover:bg-rose-100 text-slate-400 hover:text-rose-600 rounded transition-opacity"
+                              >
+                                <Trash2 className="w-2.5 h-2.5" />
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+              </nav>
+            </>
+          )}
         </aside>
 
         {/* Main Directory Area */}
         <div className="flex-1 flex flex-col overflow-hidden">
-          {/* Tabs Header */}
-          <div className="px-8 pt-4 bg-white border-b border-slate-200 shrink-0">
+          {/* Top Summary Stat Cards */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 px-8 pt-5 pb-3 bg-white border-b border-slate-200">
+            <button
+              type="button"
+              onClick={() => setActiveTab("all")}
+              className={cn(
+                "p-3.5 rounded-xl border text-left transition-all cursor-pointer flex items-center justify-between shadow-2xs group",
+                activeTab === "all"
+                  ? "bg-blue-50/90 border-[#2b61d6] ring-1 ring-[#2b61d6]"
+                  : "bg-slate-50/70 border-slate-200 hover:bg-slate-100/80"
+              )}
+            >
+              <div>
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">All Campaigns</span>
+                <div className="text-2xl font-extrabold text-slate-900 mt-0.5">{countAll}</div>
+              </div>
+              <div className="w-10 h-10 rounded-lg bg-blue-100 text-[#2b61d6] flex items-center justify-center font-bold shrink-0 group-hover:scale-105 transition-transform">
+                <FileText className="w-5 h-5" />
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab("inprogress")}
+              className={cn(
+                "p-3.5 rounded-xl border text-left transition-all cursor-pointer flex items-center justify-between shadow-2xs group",
+                activeTab === "inprogress"
+                  ? "bg-amber-50/90 border-amber-500 ring-1 ring-amber-500"
+                  : "bg-slate-50/70 border-slate-200 hover:bg-slate-100/80"
+              )}
+            >
+              <div>
+                <span className="text-[10px] font-bold uppercase tracking-wider text-amber-700">In Progress</span>
+                <div className="text-2xl font-extrabold text-amber-950 mt-0.5">{countInProgress}</div>
+              </div>
+              <div className="w-10 h-10 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center font-bold shrink-0 group-hover:scale-105 transition-transform">
+                <Clock className="w-5 h-5" />
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab("approved")}
+              className={cn(
+                "p-3.5 rounded-xl border text-left transition-all cursor-pointer flex items-center justify-between shadow-2xs group",
+                activeTab === "approved"
+                  ? "bg-emerald-50/90 border-emerald-500 ring-1 ring-emerald-500"
+                  : "bg-slate-50/70 border-slate-200 hover:bg-slate-100/80"
+              )}
+            >
+              <div>
+                <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-700">Approved</span>
+                <div className="text-2xl font-extrabold text-emerald-950 mt-0.5">{countApproved}</div>
+              </div>
+              <div className="w-10 h-10 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold shrink-0 group-hover:scale-105 transition-transform">
+                <CheckCircle2 className="w-5 h-5" />
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab("failed")}
+              className={cn(
+                "p-3.5 rounded-xl border text-left transition-all cursor-pointer flex items-center justify-between shadow-2xs group",
+                activeTab === "failed"
+                  ? "bg-rose-50/90 border-rose-500 ring-1 ring-rose-500"
+                  : "bg-slate-50/70 border-slate-200 hover:bg-slate-100/80"
+              )}
+            >
+              <div>
+                <span className="text-[10px] font-bold uppercase tracking-wider text-rose-700">Failed</span>
+                <div className="text-2xl font-extrabold text-rose-950 mt-0.5">{countFailed}</div>
+              </div>
+              <div className="w-10 h-10 rounded-lg bg-rose-100 text-rose-700 flex items-center justify-center font-bold shrink-0 group-hover:scale-105 transition-transform">
+                <XCircle className="w-5 h-5" />
+              </div>
+            </button>
+          </div>
+
+          {/* Tabs Header Navigation */}
+          <div className="px-8 pt-3 bg-white border-b border-slate-200 shrink-0">
             <nav className="flex space-x-6">
               {TABS.map((tab) => {
-                const count = campaigns.filter(c => {
-                  if (tab.isRecycle) return c.is_deleted === true;
-                  if (c.is_deleted) return false;
-                  if (tab.id === "all") return true;
-                  if (tab.id === "drafts") return c.status === "Draft";
-                  if (tab.id === "active") return c.status !== "Completed" && c.status !== "Approved" && c.status !== "Failed";
-                  if (tab.id === "review") return c.status === "Failed" || c.status === "QA Pending" || c.status === "Review Pending";
-                  if (tab.id === "completed") return c.status === "Completed" || c.status === "Approved";
-                  return true;
-                }).length;
+                const count = tab.id === "all" ? countAll
+                  : tab.id === "inprogress" ? countInProgress
+                  : tab.id === "approved" ? countApproved
+                  : tab.id === "failed" ? countFailed
+                  : 0;
 
                 return (
                   <button
                     key={tab.id}
                     onClick={() => setActiveTab(tab.id)}
                     className={cn(
-                      "pb-3 text-xs font-semibold transition-colors relative flex items-center gap-1.5",
-                      activeTab === tab.id
-                        ? tab.isRecycle ? "text-rose-600" : "text-[#2b61d6]"
-                        : "text-slate-500 hover:text-slate-800"
+                      "pb-2.5 text-xs font-semibold transition-colors relative flex items-center gap-1.5 cursor-pointer",
+                      activeTab === tab.id ? "text-[#2b61d6]" : "text-slate-500 hover:text-slate-800"
                     )}
                   >
-                    {tab.isRecycle && <Trash2 className="w-3.5 h-3.5 text-rose-500" />}
                     {tab.label}
                     <span className={cn(
-                      "px-1.5 py-0.2 text-[10px] rounded-full font-bold",
-                      tab.isRecycle ? "bg-rose-100 text-rose-700" : "bg-slate-100 text-slate-600"
+                      "px-2 py-0.5 text-[10px] rounded-full font-bold",
+                      activeTab === tab.id ? "bg-blue-100 text-[#2b61d6]" : "bg-slate-100 text-slate-600"
                     )}>
                       {count}
                     </span>
                     {activeTab === tab.id && (
-                      <span className={cn(
-                        "absolute bottom-0 left-0 right-0 h-0.5 rounded-t-full",
-                        tab.isRecycle ? "bg-rose-600" : "bg-[#2b61d6]"
-                      )} />
+                      <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#2b61d6] rounded-t-full" />
                     )}
                   </button>
                 );
@@ -1318,6 +1555,184 @@ export function Campaigns({ userEmail = "admin@example.com", userRole }: { userE
               >
                 {isPermanentDelete ? "Delete Forever" : "Move to Recycle Bin"}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* DATABASE SYNCHRONIZATION AUDIT & RETRY MODAL */}
+      {showSyncAuditModal && syncAuditResult && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-xl max-w-2xl w-full p-6 shadow-2xl border border-slate-200 my-8">
+            {/* Modal Header */}
+            <div className="flex items-start justify-between border-b border-slate-100 pb-4 mb-4">
+              <div className="flex items-center gap-3">
+                <div className={cn(
+                  "p-2.5 rounded-lg shrink-0",
+                  syncAuditResult.status === 'success' ? "bg-emerald-100 text-emerald-700" :
+                  syncAuditResult.status === 'partial' ? "bg-amber-100 text-amber-700" :
+                  "bg-rose-100 text-rose-700"
+                )}>
+                  <Database className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                    Database Sync & Validation Audit
+                    <span className={cn(
+                      "text-[10px] uppercase font-mono px-2 py-0.5 rounded-full border font-bold",
+                      syncAuditResult.status === 'success' ? "bg-emerald-50 text-emerald-800 border-emerald-300" :
+                      syncAuditResult.status === 'partial' ? "bg-amber-50 text-amber-800 border-amber-300" :
+                      "bg-rose-50 text-rose-800 border-rose-300"
+                    )}>
+                      {syncAuditResult.status === 'success' ? '100% Synced & Verified' :
+                       syncAuditResult.status === 'partial' ? 'Partial Sync / Warnings' : 'Sync Failed'}
+                    </span>
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Audit timestamp: {new Date(syncAuditResult.timestamp).toLocaleString()}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowSyncAuditModal(false)}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded-md hover:bg-slate-100 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Metric Cards Summary Grid */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+              <div className="bg-slate-50 border border-slate-200 p-3 rounded-lg">
+                <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Examined</div>
+                <div className="text-xl font-bold text-slate-800 mt-0.5">{syncAuditResult.totalExamined}</div>
+                <div className="text-[10px] text-slate-400">Total campaigns</div>
+              </div>
+              <div className="bg-blue-50/70 border border-blue-200 p-3 rounded-lg">
+                <div className="text-[10px] font-semibold text-blue-700 uppercase tracking-wider">Field Validated</div>
+                <div className="text-xl font-bold text-blue-900 mt-0.5">{syncAuditResult.validatedCount}</div>
+                <div className="text-[10px] text-blue-600">Critical fields present</div>
+              </div>
+              <div className="bg-emerald-50/70 border border-emerald-200 p-3 rounded-lg">
+                <div className="text-[10px] font-semibold text-emerald-700 uppercase tracking-wider">Remote Verified</div>
+                <div className="text-xl font-bold text-emerald-900 mt-0.5">{syncAuditResult.verifiedCount}</div>
+                <div className="text-[10px] text-emerald-600">Confirmed in Supabase</div>
+              </div>
+              <div className={cn(
+                "border p-3 rounded-lg",
+                (syncAuditResult.invalidCount + syncAuditResult.failedCount) > 0 
+                  ? "bg-rose-50/80 border-rose-200" 
+                  : "bg-slate-50 border-slate-200"
+              )}>
+                <div className={cn(
+                  "text-[10px] font-semibold uppercase tracking-wider",
+                  (syncAuditResult.invalidCount + syncAuditResult.failedCount) > 0 ? "text-rose-700" : "text-slate-500"
+                )}>
+                  Sync Issues
+                </div>
+                <div className={cn(
+                  "text-xl font-bold mt-0.5",
+                  (syncAuditResult.invalidCount + syncAuditResult.failedCount) > 0 ? "text-rose-900" : "text-slate-800"
+                )}>
+                  {syncAuditResult.invalidCount + syncAuditResult.failedCount}
+                </div>
+                <div className="text-[10px] text-slate-500">Validation / Net errors</div>
+              </div>
+            </div>
+
+            {/* Validation Errors Section */}
+            {syncAuditResult.validationErrors.length > 0 && (
+              <div className="mb-4 bg-amber-50/90 border border-amber-200 rounded-lg p-3">
+                <h4 className="text-xs font-bold text-amber-900 flex items-center gap-1.5 mb-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-600" />
+                  Validation Failures ({syncAuditResult.validationErrors.length})
+                </h4>
+                <div className="space-y-2 max-h-36 overflow-y-auto pr-1">
+                  {syncAuditResult.validationErrors.map((v, idx) => (
+                    <div key={idx} className="text-xs bg-white/80 p-2 rounded border border-amber-200/80 text-slate-800">
+                      <div className="font-semibold text-amber-900">{v.name} <span className="text-[10px] font-mono text-slate-400">({v.campaignId})</span></div>
+                      <ul className="list-disc list-inside text-[11px] text-amber-800 mt-0.5 pl-1 space-y-0.5">
+                        {v.errors.map((err, eIdx) => (
+                          <li key={eIdx}>{err}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Transmission Errors Section */}
+            {syncAuditResult.transmissionErrors.length > 0 && (
+              <div className="mb-4 bg-rose-50/90 border border-rose-200 rounded-lg p-3">
+                <h4 className="text-xs font-bold text-rose-900 flex items-center gap-1.5 mb-2">
+                  <XCircle className="w-4 h-4 text-rose-600" />
+                  Transmission / Supabase Write Failures ({syncAuditResult.transmissionErrors.length})
+                </h4>
+                <div className="space-y-2 max-h-36 overflow-y-auto pr-1">
+                  {syncAuditResult.transmissionErrors.map((t, idx) => (
+                    <div key={idx} className="text-xs bg-white/80 p-2 rounded border border-rose-200/80 text-slate-800">
+                      <div className="font-semibold text-rose-900">{t.name} <span className="text-[10px] font-mono text-slate-400">({t.campaignId})</span></div>
+                      <p className="text-[11px] font-mono text-rose-800 mt-0.5">{t.error}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Unverified In Remote Database Section */}
+            {syncAuditResult.unverifiedCampaigns.length > 0 && (
+              <div className="mb-4 bg-slate-50 border border-slate-200 rounded-lg p-3">
+                <h4 className="text-xs font-bold text-slate-800 flex items-center gap-1.5 mb-2">
+                  <AlertTriangle className="w-4 h-4 text-slate-600" />
+                  Unverified In Remote Database ({syncAuditResult.unverifiedCampaigns.length})
+                </h4>
+                <div className="space-y-2 max-h-32 overflow-y-auto pr-1">
+                  {syncAuditResult.unverifiedCampaigns.map((u, idx) => (
+                    <div key={idx} className="text-xs bg-white p-2 rounded border border-slate-200 text-slate-800">
+                      <div className="font-semibold">{u.name}</div>
+                      <p className="text-[11px] text-slate-500">{u.reason}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Verified Status Banner */}
+            {syncAuditResult.status === 'success' && (
+              <div className="mb-4 bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-xs text-emerald-900 flex items-center gap-2">
+                <ShieldCheck className="w-5 h-5 text-emerald-600 shrink-0" />
+                <div>
+                  <p className="font-bold">All campaign records and folder structures verified in Supabase.</p>
+                  <p className="text-[11px] text-emerald-700">Critical fields (id, name, country, status) match remote database state.</p>
+                </div>
+              </div>
+            )}
+
+            {/* Footer Action Buttons */}
+            <div className="flex items-center justify-between pt-3 border-t border-slate-100">
+              <div className="text-[11px] text-slate-500 font-mono">
+                {syncAuditResult.syncedFolderCount} folder(s) synced
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowSyncAuditModal(false)}
+                  className="px-4 py-2 rounded-md border border-slate-300 text-xs font-medium text-slate-700 hover:bg-slate-100 cursor-pointer"
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  onClick={handleRunSyncAudit}
+                  disabled={isSyncingDb}
+                  className="px-4 py-2 rounded-md bg-[#2b61d6] hover:bg-blue-700 text-white text-xs font-semibold shadow-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors"
+                >
+                  <RefreshCw className={cn("w-3.5 h-3.5", isSyncingDb && "animate-spin")} />
+                  <span>{isSyncingDb ? "Retrying Sync..." : "Retry Sync Now"}</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>

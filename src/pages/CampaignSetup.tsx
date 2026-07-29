@@ -16,7 +16,8 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { validateCampaignHTML } from "@/lib/qa-validator";
 import { fetchAndValidateCountryUrls, fetchAllowedUrlPattern } from "@/lib/url-validator";
-import { isCampaignNameUnique, saveCampaignRecord, getFolders, processOfflineSyncQueue, FolderItem, CampaignRecord } from "@/lib/campaign-storage";
+import { isCampaignNameUnique, saveCampaignRecord, getCampaignById, getFolders, processOfflineSyncQueue, FolderItem, CampaignRecord } from "@/lib/campaign-storage";
+import { fetchPlatformChecklists } from "@/lib/checklist-storage";
 import { parseMsgArrayBuffer } from "@/lib/msg-parser";
 import { logAction, getCampaignLogs } from "@/lib/logger";
 import { supabase } from "@/lib/supabase";
@@ -88,7 +89,8 @@ const formSchema = z.object({
 
 type FormValues = z.infer<typeof formSchema>;
 
-export function CampaignSetup({ userEmail }: { userEmail?: string }) {
+export function CampaignSetup({ userEmail = "admin@example.com", userRole = "user" }: { userEmail?: string; userRole?: string }) {
+  const isAdmin = userRole === "admin";
   const [currentStep, setCurrentStep] = useState(1);
   const [countries, setCountries] = useState<any[]>([]);
   const [qaResults, setQaResults] = useState<any[]>([]);
@@ -127,6 +129,9 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
   const [reviewNote, setReviewNote] = useState("");
   const [campaignLogs, setCampaignLogs] = useState<any[]>([]);
   const [campaignStatus, setCampaignStatus] = useState<string>("Draft");
+  const [remoteQaUpdateNotice, setRemoteQaUpdateNotice] = useState<string | null>(null);
+  const [toastNotice, setToastNotice] = useState<string | null>(null);
+  const isApprovedLocked = campaignStatus === "Approved" && !isAdmin;
 
   const [grammarCheckResult, setGrammarCheckResult] = useState<string | null>(null);
   const [isCheckingGrammar, setIsCheckingGrammar] = useState(false);
@@ -175,11 +180,13 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
         htmlSource: data.htmlSource || "",
         figmaUrl: designChoice === "figma" ? (data.figmaUrl || "") : "",
         litmusUrl: data.litmusUrl || "",
-        status: overrides.status || campaignStatus || "Draft",
+        status: overrides.status || (campaignStatus === "Approved" || campaignStatus === "Failed" ? campaignStatus : "In Progress"),
         createdBy: userEmail || "admin@example.com",
         lastEditedBy: userEmail || "admin@example.com",
         checklists: campaignChecklists,
         checklistAnswers: checklistAnswers,
+        qaResults: overrides.qaResults !== undefined ? overrides.qaResults : qaResults,
+        reviewNote: overrides.reviewNote !== undefined ? overrides.reviewNote : reviewNote,
         currentStep: overrides.currentStep !== undefined ? overrides.currentStep : currentStep,
         outlookFileName: overrides.outlookFileName !== undefined ? overrides.outlookFileName : (outlookFileName || undefined),
         outlookExtractedHtml: overrides.outlookExtractedHtml !== undefined ? overrides.outlookExtractedHtml : (outlookExtractedHtml || undefined),
@@ -189,7 +196,7 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
         ...overrides
       });
 
-      setCampaignStatus(record.status || "Draft");
+      setCampaignStatus(record.status || "In Progress");
       setDraftSavedAt(new Date().toLocaleTimeString());
       if (!editId && record.id) {
         setSearchParams((prev) => {
@@ -475,10 +482,11 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
   };
 
   useEffect(() => {
-    const loadedChecklists = localStorage.getItem("platform_checklists");
-    if (loadedChecklists) {
-      setTeamChecklists(JSON.parse(loadedChecklists));
-    }
+    const loadMasterChecklists = async () => {
+      const data = await fetchPlatformChecklists();
+      setTeamChecklists(data);
+    };
+    loadMasterChecklists();
   }, []);
 
   useEffect(() => {
@@ -486,57 +494,36 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
       setIsEditMode(true);
       const loadCampaign = async () => {
         console.log(`[CampaignSetup] Loading campaign ID '${editId}' for editing...`);
-        let campaignData = null;
-
-        try {
-          if (import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_URL !== 'https://placeholder.supabase.co') {
-            const { data, error } = await supabase.from('campaigns').select('*').eq('id', editId).single();
-            if (error) {
-              console.warn("[CampaignSetup] Could not fetch campaign from Supabase, falling back to local storage:", error);
-            } else if (data) {
-              campaignData = data;
-            }
-          }
-        } catch (e) {
-          console.warn("[CampaignSetup] Exception fetching campaign from Supabase, falling back to local storage:", e);
-        }
-
-        if (!campaignData) {
-          const localRaw = localStorage.getItem("local_campaigns");
-          if (localRaw) {
-            try {
-              const localList: any[] = JSON.parse(localRaw);
-              const found = localList.find((c: any) => String(c.id) === String(editId));
-              if (found) campaignData = found;
-            } catch (err) {}
-          }
-        }
+        const campaignData = await getCampaignById(editId);
 
         if (campaignData) {
           setValue('name', campaignData.name || "");
           setValue('team', campaignData.team || "HP-APJ");
           setValue('country', campaignData.country || "");
-          setValue('versionName', campaignData.version_name || campaignData.versionName || "");
+          setValue('versionName', campaignData.versionName || campaignData.version_name || "");
           setValue('folder_id', campaignData.folder_id || targetFolderParam || "");
-          setValue('webViewUrl', campaignData.web_view_url || campaignData.webViewUrl || "");
-          setValue('htmlSource', campaignData.html_source || campaignData.htmlSource || "");
-          setValue('figmaUrl', campaignData.figma_url || campaignData.figmaUrl || "");
-          setValue('litmusUrl', campaignData.litmus_url || campaignData.litmusUrl || "");
+          setValue('webViewUrl', campaignData.webViewUrl || campaignData.web_view_url || "");
+          setValue('htmlSource', campaignData.htmlSource || campaignData.html_source || "");
+          setValue('figmaUrl', campaignData.figmaUrl || campaignData.figma_url || "");
+          setValue('litmusUrl', campaignData.litmusUrl || campaignData.litmus_url || "");
           setCampaignStatus(campaignData.status || "QA Pending");
-          if (campaignData.figma_url || campaignData.figmaUrl) setDesignChoice("figma");
+          if (campaignData.figmaUrl || campaignData.figma_url) setDesignChoice("figma");
+
+          // Load master checklists first to ensure team lists are up to date
+          const masterChecklists = await fetchPlatformChecklists();
 
           // Load frozen checklists snapshot if available
           if (campaignData.checklists && Array.isArray(campaignData.checklists) && campaignData.checklists.length > 0) {
             setCampaignChecklists(campaignData.checklists);
           } else {
-            const loadedChecklists = localStorage.getItem("platform_checklists");
-            const teamLists = loadedChecklists ? JSON.parse(loadedChecklists) : teamChecklists;
-            const masterItems = teamLists.find((c: any) => c.team === (campaignData.team || "HP-APJ"))?.items || [];
+            const masterItems = masterChecklists.find((c: any) => c.team === (campaignData.team || "HP-APJ"))?.items || [];
             setCampaignChecklists(masterItems);
           }
 
-          if (campaignData.checklistAnswers && typeof campaignData.checklistAnswers === 'object') {
-            setChecklistAnswers(campaignData.checklistAnswers);
+          // Check both camelCase and snake_case for checklist answers
+          const answers = campaignData.checklistAnswers || (campaignData as any).checklist_answers;
+          if (answers && typeof answers === 'object') {
+            setChecklistAnswers(answers);
           }
 
           if (campaignData.outlookExtractedHtml) setOutlookExtractedHtml(campaignData.outlookExtractedHtml);
@@ -594,7 +581,7 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
           clearTimeout(timeoutId);
           timeoutId = setTimeout(() => {
             saveCurrentCampaignState();
-          }, 3000);
+          }, 1200);
         }
       }
     });
@@ -603,6 +590,45 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
       clearTimeout(timeoutId);
     };
   }, [watch, editId, setError, clearErrors, campaignStatus, designChoice, userEmail, currentStep, outlookFileName, outlookExtractedHtml, outlookSubject, checklistAnswers]);
+
+  // Realtime subscription to detect concurrent QA updates by other users
+  useEffect(() => {
+    if (!editId) return;
+    if (!import.meta.env.VITE_SUPABASE_URL || import.meta.env.VITE_SUPABASE_URL === 'https://placeholder.supabase.co') return;
+
+    const channel = supabase
+      .channel(`campaign-qa-${editId}`)
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'campaigns',
+        filter: `id=eq.${editId}`
+      }, (payload: any) => {
+        const updated = payload.new;
+        if (updated && updated.last_edited_by && updated.last_edited_by !== userEmail) {
+          setRemoteQaUpdateNotice(`⚠️ User ${updated.last_edited_by} updated QA checkpoints or status. Click to reload latest checkpoints.`);
+        }
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [editId, userEmail]);
+
+  const handleSyncRemoteQaAnswers = async () => {
+    if (!editId) return;
+    const remote = await getCampaignById(editId);
+    if (remote) {
+      if (remote.checklistAnswers || (remote as any).checklist_answers) {
+        setChecklistAnswers(remote.checklistAnswers || (remote as any).checklist_answers);
+      }
+      if (remote.status) setCampaignStatus(remote.status);
+      setToastNotice("✓ Synced latest QA checkpoints from database.");
+      setTimeout(() => setToastNotice(null), 3500);
+    }
+    setRemoteQaUpdateNotice(null);
+  };
 
   useEffect(() => {
     const fetchCountries = async () => {
@@ -625,17 +651,7 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
     };
     fetchCountries();
 
-    const storedChecklists = localStorage.getItem("platform_checklists");
-    if (storedChecklists) {
-      setTeamChecklists(JSON.parse(storedChecklists));
-    } else {
-      const defaults = [
-        { team: "HP-APJ", items: [{ id: "1", text: "Verify APJ specific legal compliance" }, { id: "2", text: "Check translations for APAC regions" }] },
-        { team: "HP-EMEA", items: [{ id: "3", text: "Ensure GDPR compliance points are met" }, { id: "4", text: "Verify EMEA pricing formats" }] }
-      ];
-      setTeamChecklists(defaults);
-      localStorage.setItem("platform_checklists", JSON.stringify(defaults));
-    }
+    fetchPlatformChecklists().then(setTeamChecklists);
   }, []);
 
   const selectedCountryConfig = countries.find((c: any) => c.name === values.country && c.code === values.versionName);
@@ -726,7 +742,7 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
       clearErrors();
       const nextS = Math.min(currentStep + 1, 7);
       setCurrentStep(nextS);
-      saveCurrentCampaignState({ currentStep: nextS });
+      saveCurrentCampaignState({ currentStep: nextS, qaResults: qaResults });
     }
   };
 
@@ -924,7 +940,7 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
             size="sm"
             className="gap-2 text-slate-700 border-slate-300 text-xs font-semibold"
             onClick={handleManualSave}
-            disabled={isSubmitting}
+            disabled={isSubmitting || isApprovedLocked}
           >
             <Save className="w-4 h-4 text-[#2b61d6]" />
             Save Draft
@@ -947,7 +963,7 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
                 size="sm"
                 className="gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold"
                 onClick={() => handleDecision("Approved")}
-                disabled={isSubmitting}
+                disabled={isSubmitting || isApprovedLocked}
               >
                 <CheckCircle2 className="w-4 h-4" />
                 Approve Campaign
@@ -959,7 +975,7 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
                 variant="destructive"
                 className="gap-1.5 bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold"
                 onClick={() => handleDecision("Failed")}
-                disabled={isSubmitting}
+                disabled={isSubmitting || isApprovedLocked}
               >
                 <XCircle className="w-4 h-4" />
                 Fail Campaign
@@ -968,6 +984,43 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
           )}
         </div>
       </header>
+
+      {/* Approved Lock Banner */}
+      {isApprovedLocked && (
+        <div className="bg-amber-500/10 border-b border-amber-500/30 text-amber-900 px-6 py-3 flex items-center justify-between shadow-xs">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-amber-500/20 text-amber-800 rounded-lg shrink-0">
+              <ShieldCheck className="w-5 h-5" />
+            </div>
+            <div>
+              <p className="text-xs font-bold text-amber-950">🔒 Campaign Approved & Locked (Read-Only Mode)</p>
+              <p className="text-[11px] text-amber-800">
+                This campaign has been Approved and locked. Standard users can inspect all steps, checkpoints, links, and preview outputs in read-only mode. Only Admins can modify approved campaigns.
+              </p>
+            </div>
+          </div>
+          <span className="text-[10px] bg-amber-200 text-amber-900 px-3 py-1 rounded-full font-bold uppercase shrink-0">
+            Read-Only
+          </span>
+        </div>
+      )}
+
+      {/* Concurrent User Update Banner */}
+      {remoteQaUpdateNotice && (
+        <div className="bg-blue-500/10 border-b border-blue-500/30 text-blue-900 px-6 py-2.5 flex items-center justify-between shadow-xs">
+          <div className="flex items-center gap-2.5">
+            <RefreshCw className="w-4 h-4 text-blue-600 animate-spin shrink-0" />
+            <p className="text-xs font-medium text-blue-900">{remoteQaUpdateNotice}</p>
+          </div>
+          <button
+            type="button"
+            onClick={handleSyncRemoteQaAnswers}
+            className="px-3 py-1 bg-[#2b61d6] text-white rounded text-xs font-semibold hover:bg-blue-700 transition-colors shrink-0"
+          >
+            Sync Checkpoints
+          </button>
+        </div>
+      )}
 
       <form className="flex-1 flex flex-col min-h-0 overflow-y-auto" onSubmit={(e) => { e.preventDefault(); handleSubmit(onSubmit, onInvalid)(e); }}>
         <MasterChecklistSidebar checklists={checklists} answers={checklistAnswers} />
@@ -993,6 +1046,7 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
                     answers={checklistAnswers} 
                     setAnswers={setChecklistAnswers} 
                     showError={showChecklistError}
+                    disabled={isApprovedLocked}
                   />
                 </div>
               )}
@@ -1265,6 +1319,7 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
                 <VisualComparison 
                   webViewUrl={resolvedWebViewUrl || values.webViewUrl} 
                   figmaUrl={values.figmaUrl} 
+                  htmlSource={processedHtmlSource || values.htmlSource}
                   initialMsgHtml={outlookExtractedHtml}
                   initialMsgFileName={outlookFileName || outlookFile?.name}
                   initialMsgSubject={outlookSubject || extractedSubject}
@@ -1294,7 +1349,7 @@ export function CampaignSetup({ userEmail }: { userEmail?: string }) {
                 "flex flex-col flex-1 min-h-[700px] border border-slate-200 rounded-xl shadow-xs bg-white transition-all duration-300",
                 fullScreenTarget === "step3" ? "fixed inset-0 z-[100] m-4 border-2 shadow-2xl" : ""
               )}>
-                <TagInspection htmlSource={processedHtmlSource || values.htmlSource} subjectLine={extractedSubject} viewOnlineUrl={values.webViewUrl || values.litmusUrl} />
+                <TagInspection htmlSource={processedHtmlSource || values.htmlSource} subjectLine={extractedSubject} viewOnlineUrl={resolvedWebViewUrl || values.webViewUrl || values.litmusUrl} />
               </div>
             )}
             

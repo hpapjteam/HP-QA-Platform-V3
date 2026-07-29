@@ -11,6 +11,7 @@ import { Settings } from "./pages/Settings";
 import { UsersList } from "./pages/Users";
 import { Checklists } from "./pages/Checklists";
 import { Reports } from "./pages/Reports";
+import { RecycleBin } from "./pages/RecycleBin";
 import { DatabaseRequirementScreen } from "./components/DatabaseRequirementScreen";
 
 export default function App() {
@@ -84,8 +85,9 @@ export default function App() {
         ) : (
           <Route path="/" element={<AppLayout role={userRole} />}>
             <Route index element={<Dashboard userEmail={userEmail} userRole={userRole} />} />
-            <Route path="campaigns/new" element={<CampaignSetup userEmail={userEmail} />} />
+            <Route path="campaigns/new" element={<CampaignSetup userEmail={userEmail} userRole={userRole} />} />
             <Route path="campaigns" element={<Campaigns userEmail={userEmail} userRole={userRole} />} />
+            <Route path="recycle-bin" element={<RecycleBin userEmail={userEmail} userRole={userRole} />} />
             <Route path="reports" element={<Reports />} />
             <Route path="users" element={userRole === "admin" ? <UsersList /> : <Navigate to="/" replace />} />
             <Route path="settings" element={userRole === "admin" ? <Settings role={userRole} /> : <Navigate to="/" replace />} />

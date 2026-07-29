@@ -287,20 +287,32 @@ export function NetworkStatusBar() {
         {/* Action Controls */}
         <div className="flex items-center gap-2">
           {isOnline && (
-            <button
-              type="button"
-              onClick={triggerSync}
-              disabled={isSyncing}
-              className={cn(
-                "px-2.5 py-1 rounded text-[11px] font-bold transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-50",
-                !isRealSupabase
-                  ? "bg-amber-600 hover:bg-amber-700 text-white"
-                  : "bg-blue-600 hover:bg-blue-500 text-white"
-              )}
-            >
-              <RefreshCw className={cn("w-3 h-3", isSyncing && "animate-spin")} />
-              {isSyncing ? "Syncing..." : isRealSupabase ? "Sync Database" : "Push Local Data"}
-            </button>
+            isRealSupabase && pendingCount === 0 && !isSyncing ? (
+              <button
+                type="button"
+                onClick={triggerSync}
+                className="px-2.5 py-1 rounded text-[11px] font-bold transition-all inline-flex items-center gap-1.5 cursor-pointer bg-emerald-600/90 hover:bg-emerald-500 text-white shadow-xs"
+                title="Database is synchronized with Supabase"
+              >
+                <Check className="w-3.5 h-3.5 text-white stroke-[3]" />
+                <span>Synced</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={triggerSync}
+                disabled={isSyncing}
+                className={cn(
+                  "px-2.5 py-1 rounded text-[11px] font-bold transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-50",
+                  !isRealSupabase
+                    ? "bg-amber-600 hover:bg-amber-700 text-white"
+                    : "bg-blue-600 hover:bg-blue-500 text-white"
+                )}
+              >
+                <RefreshCw className={cn("w-3 h-3", isSyncing && "animate-spin")} />
+                {isSyncing ? "Syncing..." : isRealSupabase ? "Sync Database" : "Push Local Data"}
+              </button>
+            )
           )}
 
           <button
@@ -378,10 +390,18 @@ export function NetworkStatusBar() {
                 <h4 className="font-bold text-slate-900 text-xs uppercase tracking-wider text-slate-500">
                   Required Environment Variables (.env / Vercel)
                 </h4>
-                <div className="bg-slate-900 text-slate-200 p-3.5 rounded-xl font-mono text-xs space-y-1.5 border border-slate-800">
-                  <div className="text-emerald-400 font-semibold"># Add to .env or Vercel Environment Variables</div>
-                  <div><span className="text-blue-300">VITE_SUPABASE_URL</span>=https://your-project.supabase.co</div>
-                  <div><span className="text-blue-300">VITE_SUPABASE_ANON_KEY</span>=your-anon-public-key</div>
+                <div className="bg-slate-900 text-slate-200 p-3.5 rounded-xl font-mono text-xs space-y-1.5 border border-slate-800 break-all select-all">
+                  <div className="text-emerald-400 font-semibold mb-1">
+                    {isRealSupabase ? "# Connected Supabase Config" : "# Add to .env or Vercel Environment Variables"}
+                  </div>
+                  <div>
+                    <span className="text-blue-300">VITE_SUPABASE_URL</span>=
+                    <span className="text-amber-200 font-mono">{import.meta.env.VITE_SUPABASE_URL || "https://your-project.supabase.co"}</span>
+                  </div>
+                  <div>
+                    <span className="text-blue-300">VITE_SUPABASE_ANON_KEY</span>=
+                    <span className="text-amber-200 font-mono">{import.meta.env.VITE_SUPABASE_ANON_KEY || "your-anon-public-key"}</span>
+                  </div>
                 </div>
               </div>
 

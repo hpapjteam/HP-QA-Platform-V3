@@ -56,7 +56,34 @@ const DEFAULT_FOLDERS: FolderItem[] = [
 ];
 
 /**
- * Gets all folders from LocalStorage (or defaults).
+ * Gets all folders from Supabase or LocalStorage (or defaults).
+ */
+export async function fetchFolders(): Promise<FolderItem[]> {
+  const isDb = isSupabaseConfigured();
+  if (isDb) {
+    try {
+      const { data, error } = await supabase.from('folders').select('*');
+      if (!error && data && data.length > 0) {
+        const loaded: FolderItem[] = data.map((row: any) => ({
+          id: String(row.id),
+          name: row.name,
+          parentId: row.parent_id || row.parentId || null,
+          year: row.year || "2026",
+          created_at: row.created_at || new Date().toISOString()
+        }));
+        localStorage.setItem("local_folders", JSON.stringify(loaded));
+        return loaded;
+      }
+    } catch (e) {
+      console.warn("[CampaignStorage] Error loading folders from Supabase:", e);
+    }
+  }
+
+  return getFolders();
+}
+
+/**
+ * Gets all folders synchronously from LocalStorage (or defaults).
  */
 export function getFolders(): FolderItem[] {
   try {
@@ -89,6 +116,19 @@ export function createFolder(name: string, parentId: string | null = null): Fold
   };
   folders.push(newFolder);
   localStorage.setItem("local_folders", JSON.stringify(folders));
+
+  if (isSupabaseConfigured()) {
+    supabase.from('folders').upsert({
+      id: newFolder.id,
+      name: newFolder.name,
+      parent_id: newFolder.parentId,
+      year: newFolder.year,
+      created_at: newFolder.created_at
+    }).then(({ error }) => {
+      if (error) console.warn("[CampaignStorage] Folder save to Supabase error:", error);
+    });
+  }
+
   console.log("[CampaignStorage] Created new folder:", newFolder);
   return newFolder;
 }
@@ -99,13 +139,42 @@ export async function renameFolder(id: string, newName: string): Promise<void> {
   if (index !== -1) {
     folders[index].name = newName.trim();
     localStorage.setItem("local_folders", JSON.stringify(folders));
+
+    if (isSupabaseConfigured()) {
+      try {
+        await supabase.from('folders').update({ name: newName.trim() }).eq('id', id);
+      } catch (e) {
+        console.warn("[CampaignStorage] Rename folder error in Supabase:", e);
+      }
+    }
+
     console.log("[CampaignStorage] Renamed folder:", id, newName);
   }
 }
 
+export function isUUID(str: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(str);
+}
+
+export function ensureUuid(id: string): string {
+  if (!id) return crypto.randomUUID();
+  if (isUUID(id)) return id;
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57, h3 = 0xfae12345, h4 = 0x12345678;
+  for (let i = 0; i < id.length; i++) {
+    const ch = id.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+    h3 = Math.imul(h3 ^ ch, 3812015801);
+    h4 = Math.imul(h4 ^ ch, 2718281829);
+  }
+  const p1 = ((h1 >>> 0).toString(16) + (h2 >>> 0).toString(16)).padStart(16, '0').slice(0, 16);
+  const p2 = ((h3 >>> 0).toString(16) + (h4 >>> 0).toString(16)).padStart(16, '0').slice(0, 16);
+  return `${p1.slice(0,8)}-${p1.slice(8,12)}-4${p1.slice(13,16)}-a${p2.slice(1,4)}-${p2.slice(4,16)}`;
+}
+
 const INITIAL_SEED_CAMPAIGNS: CampaignRecord[] = [
   {
-    id: "cmp_seed_1",
+    id: ensureUuid("cmp_seed_1"),
     name: "BASE_MA_JP_JA_PUB_CON_SEG_PM_Q326_0724_Omen35L",
     country: "IN",
     versionName: "Omen 35L Launch",
@@ -120,7 +189,7 @@ const INITIAL_SEED_CAMPAIGNS: CampaignRecord[] = [
     folder_id: "2026-q3"
   },
   {
-    id: "cmp_seed_2",
+    id: ensureUuid("cmp_seed_2"),
     name: "HP_IND_EPIC_SALE_JULY_Q326_0724_Laptops",
     country: "IN",
     versionName: "Epic Laptops Sale",
@@ -133,7 +202,7 @@ const INITIAL_SEED_CAMPAIGNS: CampaignRecord[] = [
     folder_id: "2026-q3"
   },
   {
-    id: "cmp_seed_3",
+    id: ensureUuid("cmp_seed_3"),
     name: "AU_WINTER_SALE_Q326_0723_Laptops",
     country: "AU",
     versionName: "Winter Consumer Deals",
@@ -146,7 +215,7 @@ const INITIAL_SEED_CAMPAIGNS: CampaignRecord[] = [
     folder_id: "2026-q3"
   },
   {
-    id: "cmp_seed_4",
+    id: ensureUuid("cmp_seed_4"),
     name: "SG_BACK_TO_SCHOOL_Q326_0723",
     country: "SG",
     versionName: "Back To School promo",
@@ -159,7 +228,7 @@ const INITIAL_SEED_CAMPAIGNS: CampaignRecord[] = [
     folder_id: "2026-holidays"
   },
   {
-    id: "cmp_seed_5",
+    id: ensureUuid("cmp_seed_5"),
     name: "MY_MID_YEAR_OFFERS_Q326_0722",
     country: "MY",
     versionName: "Mid Year Storewide",
@@ -172,7 +241,7 @@ const INITIAL_SEED_CAMPAIGNS: CampaignRecord[] = [
     folder_id: "2026-q3"
   },
   {
-    id: "cmp_seed_6",
+    id: ensureUuid("cmp_seed_6"),
     name: "NZ_SPECTRE_X360_LAUNCH_Q326_0721",
     country: "NZ",
     versionName: "Premium Series",
@@ -228,6 +297,46 @@ function mapSupabaseToCampaignRecord(item: any): CampaignRecord {
 }
 
 /**
+ * Gets a single campaign by ID from Supabase or LocalStorage.
+ */
+export async function getCampaignById(id: string): Promise<CampaignRecord | null> {
+  const isRealSupabase = isSupabaseConfigured();
+
+  if (isRealSupabase) {
+    try {
+      const targetId = isUUID(id) ? id : ensureUuid(String(id));
+      const { data, error } = await supabase
+        .from("campaigns")
+        .select("*")
+        .eq("id", targetId)
+        .maybeSingle();
+
+      if (!error && data) {
+        return mapSupabaseToCampaignRecord(data);
+      }
+    } catch (err) {
+      console.warn("[CampaignStorage] Exception fetching campaign by ID from Supabase:", err);
+    }
+  }
+
+  // Fallback to local storage
+  try {
+    const localRaw = localStorage.getItem("local_campaigns");
+    if (localRaw) {
+      const localList: CampaignRecord[] = JSON.parse(localRaw);
+      const found = localList.find((c) => String(c.id) === String(id) || ensureUuid(String(c.id)) === ensureUuid(String(id)));
+      if (found) {
+        return mapSupabaseToCampaignRecord(found);
+      }
+    }
+  } catch (e) {
+    console.error("[CampaignStorage] Error reading local_campaigns:", e);
+  }
+
+  return null;
+}
+
+/**
  * Gets all campaigns from Supabase (single source of truth).
  */
 export async function getAllCampaigns(): Promise<CampaignRecord[]> {
@@ -242,45 +351,15 @@ export async function getAllCampaigns(): Promise<CampaignRecord[]> {
 
       if (!error && data) {
         const mapped = data.map(mapSupabaseToCampaignRecord);
-        
-        if (mapped.length > 0) {
-          try {
-            localStorage.setItem("local_campaigns", JSON.stringify(mapped));
-          } catch (e) {}
-          return mapped;
-        }
-
-        // Fresh / Empty database: check for local items or use initial seed campaigns
-        let localItems: CampaignRecord[] = [];
         try {
-          const localRaw = localStorage.getItem("local_campaigns");
-          if (localRaw) {
-            localItems = JSON.parse(localRaw);
-          }
+          localStorage.setItem("local_campaigns", JSON.stringify(mapped));
         } catch (e) {}
-
-        if (!Array.isArray(localItems) || localItems.length === 0) {
-          localItems = [...INITIAL_SEED_CAMPAIGNS];
-        }
-
-        // Auto-seed the newly connected Supabase database
-        await syncAllCampaignsToDatabase(localItems);
-
-        try {
-          localStorage.setItem("local_campaigns", JSON.stringify(localItems));
-        } catch (e) {}
-
-        const reFetch = await supabase.from("campaigns").select("*").order("updated_at", { ascending: false });
-        if (!reFetch.error && reFetch.data && reFetch.data.length > 0) {
-          return reFetch.data.map(mapSupabaseToCampaignRecord);
-        }
-
-        return localItems.map(mapSupabaseToCampaignRecord);
+        return mapped;
       } else if (error) {
-        console.error("[CampaignStorage] Supabase fetch error:", error);
+        console.warn("[CampaignStorage] Supabase fetch error (falling back to local):", error);
       }
     } catch (err) {
-      console.error("[CampaignStorage] Error fetching from Supabase:", err);
+      console.warn("[CampaignStorage] Error fetching from Supabase (falling back to local):", err);
     }
   }
 
@@ -289,7 +368,7 @@ export async function getAllCampaigns(): Promise<CampaignRecord[]> {
     const localRaw = localStorage.getItem("local_campaigns");
     if (localRaw) {
       const parsed: CampaignRecord[] = JSON.parse(localRaw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
+      if (Array.isArray(parsed)) {
         return parsed.map(mapSupabaseToCampaignRecord);
       }
     }
@@ -302,22 +381,172 @@ export async function getAllCampaigns(): Promise<CampaignRecord[]> {
 
 
 /**
- * Syncs/Populates all given campaign records to Supabase database.
+ * Syncs all folder records to Supabase database.
  */
-export async function syncAllCampaignsToDatabase(campaigns: CampaignRecord[]): Promise<number> {
+export async function syncAllFoldersToDatabase(): Promise<number> {
   const isRealSupabase = isSupabaseConfigured();
   if (!isRealSupabase) return 0;
 
+  const folders = getFolders();
   let count = 0;
-  for (const record of campaigns) {
+  for (const f of folders) {
+    try {
+      const { error } = await supabase.from('folders').upsert({
+        id: String(f.id),
+        name: f.name,
+        parent_id: f.parentId || null,
+        year: f.year || "2026",
+        created_at: f.created_at || new Date().toISOString()
+      });
+      if (!error) count++;
+    } catch (e) {
+      console.warn("[CampaignStorage] Error syncing folder:", f.name, e);
+    }
+  }
+  return count;
+}
+
+/**
+ * Validates critical campaign fields required for Supabase and application consistency.
+ */
+export function validateCampaignRecord(rec: Partial<CampaignRecord>): { isValid: boolean; errors: string[] } {
+  const errors: string[] = [];
+  if (!rec.id || typeof rec.id !== 'string' || !rec.id.trim()) {
+    errors.push("Missing or invalid campaign ID");
+  }
+  if (!rec.name || typeof rec.name !== 'string' || !rec.name.trim()) {
+    errors.push("Missing campaign Name");
+  }
+  if (!rec.country || typeof rec.country !== 'string' || !rec.country.trim()) {
+    errors.push("Missing campaign Country code");
+  }
+  return {
+    isValid: errors.length === 0,
+    errors
+  };
+}
+
+export interface SyncAuditResult {
+  timestamp: string;
+  totalExamined: number;
+  validatedCount: number;
+  invalidCount: number;
+  syncedCount: number;
+  failedCount: number;
+  verifiedCount: number;
+  syncedFolderCount: number;
+  validationErrors: { campaignId: string; name: string; errors: string[] }[];
+  transmissionErrors: { campaignId: string; name: string; error: string }[];
+  unverifiedCampaigns: { campaignId: string; name: string; reason: string }[];
+  status: 'success' | 'partial' | 'failed';
+}
+
+/**
+ * Performs a comprehensive audit and data sync of Campaigns to Supabase:
+ * 1. Validates presence of critical campaign fields (id, name, country).
+ * 2. Transmits valid records to Supabase with fallback handling.
+ * 3. Verifies post-sync existence in Supabase via explicit query.
+ * 4. Clears verified items from offline sync queue.
+ * 5. Returns detailed diagnostic results for immediate UI feedback.
+ */
+export async function auditAndSyncCampaigns(campaigns?: CampaignRecord[]): Promise<SyncAuditResult> {
+  const timestamp = new Date().toISOString();
+  const isRealSupabase = isSupabaseConfigured();
+
+  // 1. Gather target campaigns
+  let targetList: CampaignRecord[] = campaigns || [];
+  if (!targetList || targetList.length === 0) {
+    try {
+      const localRaw = localStorage.getItem("local_campaigns");
+      if (localRaw) {
+        targetList = JSON.parse(localRaw);
+      }
+    } catch (e) {}
+  }
+  if (!targetList || targetList.length === 0) {
+    targetList = [...INITIAL_SEED_CAMPAIGNS];
+  }
+
+  // Include queued offline records if missing
+  try {
+    const queueRaw = localStorage.getItem("offline_sync_queue");
+    if (queueRaw) {
+      const queue: CampaignRecord[] = JSON.parse(queueRaw);
+      for (const qItem of queue) {
+        if (!targetList.some(t => String(t.id) === String(qItem.id))) {
+          targetList.push(qItem);
+        }
+      }
+    }
+  } catch (e) {}
+
+  // Normalize campaign IDs to valid UUIDs for Supabase PostgreSQL UUID datatype
+  targetList = targetList.map(rec => ({
+    ...rec,
+    id: ensureUuid(String(rec.id))
+  }));
+
+  const totalExamined = targetList.length;
+  const validationErrors: { campaignId: string; name: string; errors: string[] }[] = [];
+  const transmissionErrors: { campaignId: string; name: string; error: string }[] = [];
+  const unverifiedCampaigns: { campaignId: string; name: string; reason: string }[] = [];
+
+  const validRecords: CampaignRecord[] = [];
+
+  // 2. Validate critical fields
+  for (const rec of targetList) {
+    const val = validateCampaignRecord(rec);
+    if (!val.isValid) {
+      validationErrors.push({
+        campaignId: String(rec.id || 'unknown'),
+        name: rec.name || 'Untitled',
+        errors: val.errors
+      });
+    } else {
+      validRecords.push(rec);
+    }
+  }
+
+  const validatedCount = validRecords.length;
+  const invalidCount = validationErrors.length;
+
+  if (!isRealSupabase) {
+    // Local storage fallback mode
+    try {
+      localStorage.setItem("local_campaigns", JSON.stringify(targetList));
+    } catch (e) {}
+    return {
+      timestamp,
+      totalExamined,
+      validatedCount,
+      invalidCount,
+      syncedCount: 0,
+      failedCount: 0,
+      verifiedCount: validatedCount,
+      syncedFolderCount: 0,
+      validationErrors,
+      transmissionErrors: [],
+      unverifiedCampaigns: [],
+      status: invalidCount === 0 ? 'success' : 'partial'
+    };
+  }
+
+  // 3. Sync Folders
+  const syncedFolderCount = await syncAllFoldersToDatabase();
+
+  // 4. Transmission to Supabase
+  const successfullyTransmittedIds: string[] = [];
+
+  for (const record of validRecords) {
     try {
       const payload = formatSupabaseCampaignRecord(record);
       const { error } = await supabase.from("campaigns").upsert(payload);
       if (!error) {
-        count++;
+        successfullyTransmittedIds.push(String(record.id));
       } else {
+        console.warn(`[Sync Audit] Initial upsert error for "${record.name}", retrying fallback payload:`, error);
         const fallbackPayload = {
-          id: String(record.id),
+          id: ensureUuid(String(record.id)),
           name: record.name || "Untitled",
           country: record.country || "IN",
           version_name: record.versionName || record.version_name || "Standard",
@@ -339,13 +568,118 @@ export async function syncAllCampaignsToDatabase(campaigns: CampaignRecord[]): P
           current_step: record.currentStep || record.current_step || 1
         };
         const fbRes = await supabase.from("campaigns").upsert(fallbackPayload);
-        if (!fbRes.error) count++;
+        if (!fbRes.error) {
+          successfullyTransmittedIds.push(String(record.id));
+        } else {
+          transmissionErrors.push({
+            campaignId: String(record.id),
+            name: record.name || "Untitled",
+            error: fbRes.error.message || error.message || "Database write rejected"
+          });
+        }
       }
-    } catch (e) {
-      console.warn(`[CampaignStorage] Error populating campaign "${record.name}" to database:`, e);
+    } catch (err: any) {
+      transmissionErrors.push({
+        campaignId: String(record.id),
+        name: record.name || "Untitled",
+        error: err?.message || "Transmission network error"
+      });
     }
   }
-  return count;
+
+  // 5. Post-Transmission Remote Verification Query in Supabase
+  let verifiedCount = 0;
+
+  if (successfullyTransmittedIds.length > 0) {
+    try {
+      const { data: remoteData, error: fetchErr } = await supabase
+        .from("campaigns")
+        .select("id, name, country, status, updated_at")
+        .in("id", successfullyTransmittedIds);
+
+      if (fetchErr) {
+        for (const id of successfullyTransmittedIds) {
+          const rec = validRecords.find(r => String(r.id) === id);
+          unverifiedCampaigns.push({
+            campaignId: id,
+            name: rec?.name || 'Unknown',
+            reason: `Post-sync verification query error: ${fetchErr.message}`
+          });
+        }
+      } else if (remoteData) {
+        for (const id of successfullyTransmittedIds) {
+          const matchedRemote = remoteData.find(r => String(r.id) === id);
+          const rec = validRecords.find(r => String(r.id) === id);
+          if (matchedRemote && matchedRemote.name && matchedRemote.country) {
+            verifiedCount++;
+          } else {
+            unverifiedCampaigns.push({
+              campaignId: id,
+              name: rec?.name || 'Unknown',
+              reason: "Record not found or missing required fields in remote database verification response."
+            });
+          }
+        }
+      }
+    } catch (vErr: any) {
+      for (const id of successfullyTransmittedIds) {
+        const rec = validRecords.find(r => String(r.id) === id);
+        unverifiedCampaigns.push({
+          campaignId: id,
+          name: rec?.name || 'Unknown',
+          reason: `Verification exception: ${vErr?.message || 'Network check failed'}`
+        });
+      }
+    }
+  }
+
+  // 6. Clean queue & update local storage
+  try {
+    const queueRaw = localStorage.getItem("offline_sync_queue");
+    if (queueRaw) {
+      let queue: CampaignRecord[] = JSON.parse(queueRaw);
+      queue = queue.filter(q => !successfullyTransmittedIds.includes(String(q.id)));
+      localStorage.setItem("offline_sync_queue", JSON.stringify(queue));
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("offline-queue-updated", { detail: { count: queue.length } }));
+      }
+    }
+  } catch (e) {}
+
+  try {
+    localStorage.setItem("local_campaigns", JSON.stringify(targetList));
+  } catch (e) {}
+
+  const syncedCount = successfullyTransmittedIds.length;
+  const failedCount = transmissionErrors.length;
+
+  let status: 'success' | 'partial' | 'failed' = 'success';
+  if (failedCount > 0 || invalidCount > 0 || unverifiedCampaigns.length > 0) {
+    status = (syncedCount > 0) ? 'partial' : 'failed';
+  }
+
+  return {
+    timestamp,
+    totalExamined,
+    validatedCount,
+    invalidCount,
+    syncedCount,
+    failedCount,
+    verifiedCount,
+    syncedFolderCount,
+    validationErrors,
+    transmissionErrors,
+    unverifiedCampaigns,
+    status
+  };
+}
+
+/**
+ * Syncs/Populates all given or stored campaign records to Supabase database.
+ */
+export async function syncAllCampaignsToDatabase(campaigns?: CampaignRecord[]): Promise<number> {
+  const result = await auditAndSyncCampaigns(campaigns);
+  return result.syncedCount;
 }
 
 /**
@@ -367,7 +701,7 @@ export async function isCampaignNameUnique(name: string, currentId?: string | nu
 
 function formatSupabaseCampaignRecord(rec: CampaignRecord): Record<string, any> {
   return {
-    id: String(rec.id),
+    id: ensureUuid(String(rec.id)),
     name: rec.name || "Untitled",
     country: rec.country || "IN",
     version_name: rec.versionName || rec.version_name || "Standard",
@@ -405,7 +739,7 @@ function formatSupabaseCampaignRecord(rec: CampaignRecord): Record<string, any> 
  */
 export async function saveCampaignRecord(campaign: Partial<CampaignRecord> & { name: string; country: string }): Promise<CampaignRecord> {
   const now = new Date().toISOString();
-  const id = campaign.id || `cmp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  const id = campaign.id ? ensureUuid(String(campaign.id)) : crypto.randomUUID();
 
   // Name uniqueness check
   const isUnique = await isCampaignNameUnique(campaign.name, id);
@@ -442,14 +776,14 @@ export async function saveCampaignRecord(campaign: Partial<CampaignRecord> & { n
     lastEditedBy: campaign.userEmail || "admin@example.com",
     created_at: existing?.created_at || campaign.created_at || now,
     updated_at: now,
-    is_deleted: false,
-    deleted_by: null,
-    deleted_at: null,
+    is_deleted: campaign.is_deleted !== undefined ? campaign.is_deleted : (existing?.is_deleted || false),
+    deleted_by: campaign.deleted_by !== undefined ? campaign.deleted_by : (existing?.deleted_by || null),
+    deleted_at: campaign.deleted_at !== undefined ? campaign.deleted_at : (existing?.deleted_at || null),
     folder_id: campaign.folder_id || existing?.folder_id || "2026",
-    reviewNote: campaign.reviewNote || existing?.reviewNote || "",
-    qaResults: campaign.qaResults || existing?.qaResults || [],
-    checklists: campaign.checklists || existing?.checklists || [],
-    checklistAnswers: campaign.checklistAnswers || existing?.checklistAnswers || {},
+    reviewNote: campaign.reviewNote !== undefined ? campaign.reviewNote : (existing?.reviewNote || ""),
+    qaResults: campaign.qaResults !== undefined ? campaign.qaResults : (existing?.qaResults || []),
+    checklists: campaign.checklists !== undefined ? campaign.checklists : (existing?.checklists || []),
+    checklistAnswers: campaign.checklistAnswers !== undefined ? campaign.checklistAnswers : (existing?.checklistAnswers || {}),
     currentStep: campaign.currentStep !== undefined ? campaign.currentStep : (existing?.currentStep || existing?.current_step || 1),
     current_step: campaign.currentStep !== undefined ? campaign.currentStep : (existing?.current_step || existing?.currentStep || 1)
   };
@@ -645,17 +979,11 @@ export async function processOfflineSyncQueue(): Promise<{ synced: number; remai
 export async function softDeleteCampaign(id: string, userEmail: string): Promise<void> {
   const now = new Date().toISOString();
   const all = await getAllCampaigns();
-  const target = all.find(c => String(c.id) === String(id));
+  const target = all.find(c => String(c.id) === String(id) || ensureUuid(String(c.id)) === ensureUuid(String(id)));
 
   if (!target) return;
 
-  const updated: Partial<CampaignRecord> = {
-    ...target,
-    is_deleted: true,
-    deleted_by: userEmail,
-    deleted_at: now,
-    updated_at: now
-  };
+  const targetId = isUUID(id) ? id : ensureUuid(String(id));
 
   try {
     await supabase.from("campaigns").update({
@@ -663,20 +991,20 @@ export async function softDeleteCampaign(id: string, userEmail: string): Promise
       deleted_by: userEmail,
       deleted_at: now,
       updated_at: now
-    }).eq("id", id);
+    }).eq("id", targetId);
   } catch (e) {
-    console.error("[CampaignStorage] Supabase delete error:", e);
+    console.warn("[CampaignStorage] Supabase delete error:", e);
   }
 
   try {
     const localRaw = localStorage.getItem("local_campaigns");
     if (localRaw) {
       let list: CampaignRecord[] = JSON.parse(localRaw);
-      list = list.map(c => String(c.id) === String(id) ? { ...c, is_deleted: true, deleted_by: userEmail, deleted_at: now, updated_at: now } : c);
+      list = list.map(c => (String(c.id) === String(id) || ensureUuid(String(c.id)) === targetId) ? { ...c, is_deleted: true, deleted_by: userEmail, deleted_at: now, updated_at: now } : c);
       localStorage.setItem("local_campaigns", JSON.stringify(list));
     }
   } catch (e) {
-    console.error("[CampaignStorage] LocalStorage soft delete error:", e);
+    console.warn("[CampaignStorage] LocalStorage soft delete error:", e);
   }
 
   await logAction(userEmail, "Delete Campaign", `Moved campaign "${target.name}" to Recycle Bin`, id);
@@ -688,9 +1016,11 @@ export async function softDeleteCampaign(id: string, userEmail: string): Promise
 export async function restoreCampaign(id: string, userEmail: string): Promise<void> {
   const now = new Date().toISOString();
   const all = await getAllCampaigns();
-  const target = all.find(c => String(c.id) === String(id));
+  const target = all.find(c => String(c.id) === String(id) || ensureUuid(String(c.id)) === ensureUuid(String(id)));
 
   if (!target) return;
+
+  const targetId = isUUID(id) ? id : ensureUuid(String(id));
 
   try {
     await supabase.from("campaigns").update({
@@ -698,20 +1028,20 @@ export async function restoreCampaign(id: string, userEmail: string): Promise<vo
       deleted_by: null,
       deleted_at: null,
       updated_at: now
-    }).eq("id", id);
+    }).eq("id", targetId);
   } catch (e) {
-    console.error("[CampaignStorage] Supabase restore error:", e);
+    console.warn("[CampaignStorage] Supabase restore error:", e);
   }
 
   try {
     const localRaw = localStorage.getItem("local_campaigns");
     if (localRaw) {
       let list: CampaignRecord[] = JSON.parse(localRaw);
-      list = list.map(c => String(c.id) === String(id) ? { ...c, is_deleted: false, deleted_by: null, deleted_at: null, updated_at: now } : c);
+      list = list.map(c => (String(c.id) === String(id) || ensureUuid(String(c.id)) === targetId) ? { ...c, is_deleted: false, deleted_by: null, deleted_at: null, updated_at: now } : c);
       localStorage.setItem("local_campaigns", JSON.stringify(list));
     }
   } catch (e) {
-    console.error("[CampaignStorage] LocalStorage restore error:", e);
+    console.warn("[CampaignStorage] LocalStorage restore error:", e);
   }
 
   await logAction(userEmail, "Restore Campaign", `Restored campaign "${target.name}" from Recycle Bin`, id);
@@ -721,21 +1051,22 @@ export async function restoreCampaign(id: string, userEmail: string): Promise<vo
  * Permanently deletes a campaign from storage.
  */
 export async function permanentlyDeleteCampaign(id: string, userEmail: string): Promise<void> {
+  const targetId = isUUID(id) ? id : ensureUuid(String(id));
   try {
-    await supabase.from("campaigns").delete().eq("id", id);
+    await supabase.from("campaigns").delete().eq("id", targetId);
   } catch (e) {
-    console.error("[CampaignStorage] Supabase permanent delete error:", e);
+    console.warn("[CampaignStorage] Supabase permanent delete error:", e);
   }
 
   try {
     const localRaw = localStorage.getItem("local_campaigns");
     if (localRaw) {
       let list: CampaignRecord[] = JSON.parse(localRaw);
-      list = list.filter(c => String(c.id) !== String(id));
+      list = list.filter(c => String(c.id) !== String(id) && ensureUuid(String(c.id)) !== targetId);
       localStorage.setItem("local_campaigns", JSON.stringify(list));
     }
   } catch (e) {
-    console.error("[CampaignStorage] LocalStorage permanent delete error:", e);
+    console.warn("[CampaignStorage] LocalStorage permanent delete error:", e);
   }
 
   await logAction(userEmail, "Permanent Delete", `Permanently deleted campaign ID: ${id}`, id);
@@ -746,10 +1077,11 @@ export async function permanentlyDeleteCampaign(id: string, userEmail: string): 
  */
 export async function moveCampaignToFolder(id: string, folderId: string, userEmail: string): Promise<void> {
   const now = new Date().toISOString();
+  const targetId = isUUID(id) ? id : ensureUuid(String(id));
   try {
-    await supabase.from("campaigns").update({ folder_id: folderId, updated_at: now }).eq("id", id);
+    await supabase.from("campaigns").update({ folder_id: folderId, updated_at: now }).eq("id", targetId);
   } catch (e) {
-    console.error("[CampaignStorage] Supabase move folder error:", e);
+    console.warn("[CampaignStorage] Supabase move folder error:", e);
   }
 
   try {
@@ -760,7 +1092,7 @@ export async function moveCampaignToFolder(id: string, folderId: string, userEma
       localStorage.setItem("local_campaigns", JSON.stringify(list));
     }
   } catch (e) {
-    console.error("[CampaignStorage] LocalStorage move folder error:", e);
+    console.warn("[CampaignStorage] LocalStorage move folder error:", e);
   }
 
   await logAction(userEmail, "Move Campaign", `Moved campaign ID: ${id} to folder ${folderId}`, id);
@@ -787,6 +1119,14 @@ export async function deleteFolder(folderId: string, userEmail: string): Promise
 
   const updatedFolders = folders.filter(f => !idsToRemove.includes(f.id));
   localStorage.setItem("local_folders", JSON.stringify(updatedFolders));
+
+  if (isSupabaseConfigured()) {
+    try {
+      await supabase.from('folders').delete().in('id', idsToRemove);
+    } catch (e) {
+      console.warn("[CampaignStorage] Supabase delete folder error:", e);
+    }
+  }
 
   await logAction(userEmail, "Delete Folder", `Deleted empty folder "${folderToDelete.name}" (ID: ${folderId})`, folderId);
 }

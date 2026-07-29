@@ -105,14 +105,11 @@ const emailTemplate = (title: string, content: string, ctaLink?: string, ctaText
 </html>
 `;
 
-async function startServer() {
-  const app = express();
-  const PORT = 3000;
+export const app = express();
+app.use(express.json());
 
-  app.use(express.json());
-
-  // Email sending API route
-  app.post("/api/invite", async (req, res) => {
+// Email sending API route
+app.post("/api/invite", async (req, res) => {
     const { name, email, role, team, inviteUrl } = req.body;
 
     if (!email || !name) {
@@ -191,17 +188,28 @@ async function startServer() {
   });
 
   app.get("/api/proxy", async (req, res) => {
-    const targetUrl = req.query.url as string;
+    let targetUrl = req.query.url as string;
     if (!targetUrl) return res.status(400).send("URL is required");
+    
+    targetUrl = targetUrl.trim();
+    if (!/^https?:\/\//i.test(targetUrl)) {
+      targetUrl = "https://" + targetUrl;
+    }
+
     if (isPrivateOrInternalUrl(targetUrl)) {
       return res.status(403).send("Forbidden: Access to internal or non-HTTP addresses is restricted.");
     }
     try {
       const response = await fetch(targetUrl, {
         headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        },
+        redirect: "follow"
       });
+      if (!response.ok) {
+        return res.status(response.status).send(`Upstream server returned ${response.status}`);
+      }
       const html = await response.text();
       const baseTag = `<base href="${targetUrl}">`;
       let modifiedHtml = html;
@@ -299,6 +307,11 @@ ${htmlContent.substring(0, 50000)}` }]
     }
   });
 
+export default app;
+
+async function startServer() {
+  const PORT = 3000;
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -318,4 +331,6 @@ ${htmlContent.substring(0, 50000)}` }]
   });
 }
 
-startServer();
+if (!process.env.VERCEL) {
+  startServer();
+}

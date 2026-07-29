@@ -26,7 +26,8 @@ export async function logAction(userEmail: string, actionType: string, details: 
     await supabase.from('activity_logs').insert([{
       user_email: email,
       action_type: actionType,
-      details: details
+      details: details,
+      campaign_id: campaignId || null
     }]);
   } catch (err) {
     console.error("Failed to log action to Supabase:", err);

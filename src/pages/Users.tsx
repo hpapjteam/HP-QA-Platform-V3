@@ -3,6 +3,7 @@ import { Users, UserPlus, Save, Pencil, Trash2, Plus, X, Ban, CheckCircle, LogIn
 import { cn } from "@/lib/utils";
 import { supabase } from "@/lib/supabase";
 import { logAction } from "@/lib/logger";
+import { fetchPlatformChecklists } from "@/lib/checklist-storage";
 
 export function UsersList() {
   const [users, setUsers] = useState<any[]>([]);
@@ -29,10 +30,7 @@ export function UsersList() {
 
   useEffect(() => {
     loadData();
-    const stored = localStorage.getItem("platform_checklists");
-    if (stored) {
-      setTeamChecklists(JSON.parse(stored));
-    }
+    fetchPlatformChecklists().then(setTeamChecklists);
   }, []);
   
   const activeChecklist = teamChecklists.find(c => c.team === userForm.team);

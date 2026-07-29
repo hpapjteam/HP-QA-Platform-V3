@@ -1,14 +1,13 @@
 import { useState, useEffect } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { LayoutDashboard, FileText, BarChart2, Users, Settings, LogOut, ChevronLeft, ChevronRight } from "lucide-react";
+import { LayoutDashboard, FileText, BarChart2, Users, Settings, LogOut, ChevronLeft, ChevronRight, Trash2, CheckSquare } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/lib/supabase";
-
-import { CheckSquare } from "lucide-react";
 
 const NAV_ITEMS = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
   { name: "Campaigns", href: "/campaigns", icon: FileText },
+  { name: "Recycle Bin", href: "/recycle-bin", icon: Trash2 },
   { name: "Reports", href: "/reports", icon: BarChart2 },
   { name: "Checklists", href: "/checklists", icon: CheckSquare, adminOnly: true },
   

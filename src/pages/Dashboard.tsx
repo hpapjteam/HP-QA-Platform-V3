@@ -140,7 +140,6 @@ export function Dashboard({ userEmail, userRole }: DashboardProps) {
 
   useEffect(() => {
     async function loadData() {
-      setIsLoading(true);
       try {
         const data = await getAllCampaigns();
         const active = data.filter(c => !c.is_deleted);
@@ -151,7 +150,39 @@ export function Dashboard({ userEmail, userRole }: DashboardProps) {
         setIsLoading(false);
       }
     }
+
     loadData();
+
+    const handleSynced = () => {
+      loadData();
+    };
+
+    window.addEventListener("database-synced", handleSynced);
+    window.addEventListener("focus", loadData);
+
+    let realtimeChannel: any = null;
+    const isRealSupabase = Boolean(import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_URL !== 'https://placeholder.supabase.co');
+    if (isRealSupabase) {
+      try {
+        realtimeChannel = supabase
+          .channel("dashboard-realtime-changes")
+          .on("postgres_changes", { event: "*", schema: "public", table: "campaigns" }, () => {
+            console.log("[Dashboard] Supabase realtime change detected, refreshing dashboard...");
+            loadData();
+          })
+          .subscribe();
+      } catch (err) {
+        console.warn("[Dashboard] Could not subscribe to Supabase Realtime:", err);
+      }
+    }
+
+    return () => {
+      window.removeEventListener("database-synced", handleSynced);
+      window.removeEventListener("focus", loadData);
+      if (realtimeChannel) {
+        supabase.removeChannel(realtimeChannel);
+      }
+    };
   }, []);
 
   // Time-based greeting logic
